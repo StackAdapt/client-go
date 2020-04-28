@@ -227,7 +227,7 @@ func (s *RegionRequestSender) onRegionError(bo *retry.Backoffer, ctx *locate.RPC
 		return false, err
 	}
 	if regionErr.GetServerIsBusy() != nil {
-		log.Warnf("tikv reports `ServerIsBusy`, reason: %s, ctx: %v, retry later", regionErr.GetServerIsBusy().GetReason(), ctx)
+		// log.Warnf("tikv reports `ServerIsBusy`, reason: %s, ctx: %v, retry later", regionErr.GetServerIsBusy().GetReason(), ctx)
 		err = bo.Backoff(retry.BoServerBusy, errors.Errorf("server is busy, ctx: %v", ctx))
 		if err != nil {
 			return false, err
