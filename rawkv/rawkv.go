@@ -106,7 +106,7 @@ func (c *Client) BatchGet(ctx context.Context, keys [][]byte) ([][]byte, error) 
 	start := time.Now()
 	defer func() { metrics.RawkvCmdHistogram.WithLabelValues("batch_get").Observe(time.Since(start).Seconds()) }()
 
-	bo := retry.NewBackoffer(ctx, retry.RawkvMaxBackoff)
+	bo := retry.NewBackoffer(ctx, retry.BatchGetMaxBackoff)
 	resp, err := c.sendBatchReq(bo, keys, rpc.CmdRawBatchGet)
 	if err != nil {
 		return nil, err
