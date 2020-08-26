@@ -530,7 +530,7 @@ func (c *rpcClient) SendRequest(ctx context.Context, addr string, req *Request, 
 	reqType := req.Type.String()
 	storeID := strconv.FormatUint(req.Context.GetPeer().GetStoreId(), 10)
 	defer func() {
-		metricName := fmt.Sprintf(`tikv_client_go_request_seconds{type="%q",store="%q"}`, reqType, storeID)
+		metricName := fmt.Sprintf(`tikv_client_go_request_seconds{type="%s",store="%s"}`, reqType, storeID)
 		vicmetrics.GetOrCreateHistogram(metricName).UpdateDuration(start)
 	}()
 
