@@ -15,12 +15,14 @@ package rpc
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	vicmetrics "github.com/VictoriaMetrics/metrics"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_opentracing "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
@@ -528,7 +530,8 @@ func (c *rpcClient) SendRequest(ctx context.Context, addr string, req *Request, 
 	reqType := req.Type.String()
 	storeID := strconv.FormatUint(req.Context.GetPeer().GetStoreId(), 10)
 	defer func() {
-		metrics.SendReqHistogram.WithLabelValues(reqType, storeID).Observe(time.Since(start).Seconds())
+		metricName := fmt.Sprintf(`tikv_client_go_request_seconds{type="%q",store="%q"}`, reqType, storeID)
+		vicmetrics.GetOrCreateHistogram(metricName).UpdateDuration(start)
 	}()
 
 	connArray, err := c.getConnArray(addr)

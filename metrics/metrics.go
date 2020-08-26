@@ -13,7 +13,9 @@
 
 package metrics
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 // Client metrics.
 var (
@@ -69,14 +71,14 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(0.0005, 2, 20),
 		})
 
-	SendReqHistogram = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "tikv",
-			Subsystem: "client_go",
-			Name:      "request_seconds",
-			Help:      "Bucketed histogram of sending request duration.",
-			Buckets:   prometheus.ExponentialBuckets(0.0005, 2, 20),
-		}, []string{"type", "store"})
+	// SendReqHistogram = prometheus.NewHistogramVec(
+	// 	prometheus.HistogramOpts{
+	// 		Namespace: "tikv",
+	// 		Subsystem: "client_go",
+	// 		Name:      "request_seconds",
+	// 		Help:      "Bucketed histogram of sending request duration.",
+	// 		Buckets:   prometheus.ExponentialBuckets(0.0005, 2, 20),
+	// 	}, []string{"type", "store"})
 
 	LockResolverCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -217,7 +219,7 @@ func init() {
 	prometheus.MustRegister(TxnCmdHistogram)
 	prometheus.MustRegister(BackoffCounter)
 	prometheus.MustRegister(BackoffHistogram)
-	prometheus.MustRegister(SendReqHistogram)
+	// prometheus.MustRegister(SendReqHistogram)
 	prometheus.MustRegister(LockResolverCounter)
 	prometheus.MustRegister(RegionErrorCounter)
 	prometheus.MustRegister(TxnWriteKVCountHistogram)
