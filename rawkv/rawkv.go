@@ -91,8 +91,8 @@ func (c *Client) ClusterID() uint64 {
 
 // Get queries value with the key. When the key does not exist, it returns `nil, nil`.
 func (c *Client) Get(ctx context.Context, key []byte) ([]byte, error) {
-	start := time.Now()
-	defer func() { metrics.RawkvCmdHistogram.WithLabelValues("get").Observe(time.Since(start).Seconds()) }()
+	// start := time.Now()
+	// defer func() { metrics.RawkvCmdHistogram.WithLabelValues("get").Observe(time.Since(start).Seconds()) }()
 
 	req := &rpc.Request{
 		Type: rpc.CmdRawGet,
@@ -116,7 +116,6 @@ func (c *Client) Get(ctx context.Context, key []byte) ([]byte, error) {
 	}
 	return cmdResp.Value, nil
 }
-
 
 // Get queries value with the key. When the key does not exist, it returns `nil, nil`.
 func (c *Client) GetKeyTTL(ctx context.Context, key []byte) (*uint64, error) {
@@ -176,10 +175,10 @@ func (c *Client) BatchGet(ctx context.Context, keys [][]byte) ([][]byte, error) 
 
 // Put stores a key-value pair to TiKV.
 func (c *Client) Put(ctx context.Context, key, value []byte, options ...PutOption) error {
-	start := time.Now()
-	defer func() { metrics.RawkvCmdHistogram.WithLabelValues("put").Observe(time.Since(start).Seconds()) }()
-	metrics.RawkvSizeHistogram.WithLabelValues("key").Observe(float64(len(key)))
-	metrics.RawkvSizeHistogram.WithLabelValues("value").Observe(float64(len(value)))
+	// start := time.Now()
+	// defer func() { metrics.RawkvCmdHistogram.WithLabelValues("put").Observe(time.Since(start).Seconds()) }()
+	// metrics.RawkvSizeHistogram.WithLabelValues("key").Observe(float64(len(key)))
+	// metrics.RawkvSizeHistogram.WithLabelValues("value").Observe(float64(len(value)))
 
 	if len(value) == 0 {
 		return errors.New("empty value is not supported")
@@ -195,7 +194,7 @@ func (c *Client) Put(ctx context.Context, key, value []byte, options ...PutOptio
 		RawPut: &kvrpcpb.RawPutRequest{
 			Key:   key,
 			Value: value,
-			Ttl:  ttl,
+			Ttl:   ttl,
 		},
 	}
 	resp, _, err := c.sendReq(ctx, key, req)
@@ -677,7 +676,7 @@ func (c *Client) doBatchPut(bo *retry.Backoffer, batch batch, ttl uint64) error 
 		Type: rpc.CmdRawBatchPut,
 		RawBatchPut: &kvrpcpb.RawBatchPutRequest{
 			Pairs: kvPair,
-			Ttl: ttl,
+			Ttl:   ttl,
 		},
 	}
 
