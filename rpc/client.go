@@ -16,7 +16,6 @@ package rpc
 import (
 	"context"
 	"io"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -524,12 +523,12 @@ func sendBatchRequest(
 
 // SendRequest sends a Request to server and receives Response.
 func (c *rpcClient) SendRequest(ctx context.Context, addr string, req *Request, timeout time.Duration) (*Response, error) {
-	start := time.Now()
-	reqType := req.Type.String()
-	storeID := strconv.FormatUint(req.Context.GetPeer().GetStoreId(), 10)
-	defer func() {
-		metrics.SendReqHistogram.WithLabelValues(reqType, storeID).Observe(time.Since(start).Seconds())
-	}()
+	// start := time.Now()
+	// reqType := req.Type.String()
+	// storeID := strconv.FormatUint(req.Context.GetPeer().GetStoreId(), 10)
+	// defer func() {
+	// 	metrics.SendReqHistogram.WithLabelValues(reqType, storeID).Observe(time.Since(start).Seconds())
+	// }()
 
 	connArray, err := c.getConnArray(addr)
 	if err != nil {
