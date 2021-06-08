@@ -471,16 +471,16 @@ func (c *RegionCache) DropStoreOnSendRequestFail(ctx *RPCContext, err error) {
 	c.mu.Unlock()
 
 	// Store's meta may be out of date.
-	var failedStoreAddr string
+	// var failedStoreAddr string
 	c.storeMu.Lock()
-	store, ok := c.storeMu.stores[failedStoreID]
+	_, ok = c.storeMu.stores[failedStoreID]
 	if ok {
-		failedStoreAddr = store.Addr
+		// failedStoreAddr = store.Addr
 		delete(c.storeMu.stores, failedStoreID)
 	}
 	c.storeMu.Unlock()
-	log.Infof("drop regions that on the store %d(%s) due to send request fail, err: %v",
-		failedStoreID, failedStoreAddr, err)
+	// log.Infof("drop regions that on the store %d(%s) due to send request fail, err: %v",
+	// 	failedStoreID, failedStoreAddr, err)
 }
 
 // OnRegionStale removes the old region and inserts new regions into the cache.
