@@ -783,8 +783,8 @@ func sendBatchRequest(
 		return tikvrpc.FromBatchCommandsResponse(res)
 	case <-ctx.Done():
 		atomic.StoreInt32(&entry.canceled, 1)
-		logutil.BgLogger().Warn("wait response is cancelled",
-			zap.String("to", addr), zap.String("cause", ctx.Err().Error()))
+		// logutil.BgLogger().Warn("wait response is cancelled",
+		// zap.String("to", addr), zap.String("cause", ctx.Err().Error()))
 		return nil, errors.Trace(ctx.Err())
 	case <-timer.C:
 		atomic.StoreInt32(&entry.canceled, 1)

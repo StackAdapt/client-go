@@ -341,7 +341,7 @@ func (s *replicaSelector) onSendFailure(bo *retry.Backoffer, err error) {
 	store := replica.store
 	// invalidate regions in store.
 	if atomic.CompareAndSwapUint32(&store.epoch, replica.epoch, replica.epoch+1) {
-		logutil.BgLogger().Info("mark store's regions need be refill", zap.Uint64("id", store.storeID), zap.String("addr", store.addr), zap.Error(err))
+		// logutil.BgLogger().Info("mark store's regions need be refill", zap.Uint64("id", store.storeID), zap.String("addr", store.addr), zap.Error(err))
 		metrics.RegionCacheCounterWithInvalidateStoreRegionsOK.Inc()
 		// schedule a store addr resolve.
 		store.markNeedCheck(s.regionCache.notifyCheckCh)
