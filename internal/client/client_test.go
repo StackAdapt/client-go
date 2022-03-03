@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -40,11 +42,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/tikvpb"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/config"
@@ -57,7 +59,7 @@ func TestConn(t *testing.T) {
 		conf.TiKVClient.MaxBatchSize = 0
 	})()
 
-	client := NewRPCClient(config.Security{})
+	client := NewRPCClient()
 
 	addr := "127.0.0.1:6379"
 	conn1, err := client.getConnArray(addr, true)
@@ -90,7 +92,7 @@ func TestSendWhenReconnect(t *testing.T) {
 	server, port := startMockTikvService()
 	require.True(t, port > 0)
 
-	rpcClient := NewRPCClient(config.Security{})
+	rpcClient := NewRPCClient()
 	addr := fmt.Sprintf("%s:%d", "127.0.0.1", port)
 	conn, err := rpcClient.getConnArray(addr, true)
 	assert.Nil(t, err)
@@ -217,7 +219,7 @@ func TestForwardMetadataByUnaryCall(t *testing.T) {
 		conf.TiKVClient.MaxBatchSize = 0
 		conf.TiKVClient.GrpcConnectionCount = 1
 	})()
-	rpcClient := NewRPCClient(config.Security{})
+	rpcClient := NewRPCClient()
 	defer rpcClient.closeConns()
 
 	var checkCnt uint64
@@ -286,7 +288,7 @@ func TestForwardMetadataByBatchCommands(t *testing.T) {
 		conf.TiKVClient.MaxBatchSize = 128
 		conf.TiKVClient.GrpcConnectionCount = 1
 	})()
-	rpcClient := NewRPCClient(config.Security{})
+	rpcClient := NewRPCClient()
 	defer rpcClient.closeConns()
 
 	var checkCnt uint64

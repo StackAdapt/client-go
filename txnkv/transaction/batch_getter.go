@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -35,7 +37,6 @@ package transaction
 import (
 	"context"
 
-	"github.com/pingcap/errors"
 	tikverr "github.com/tikv/client-go/v2/error"
 	"github.com/tikv/client-go/v2/internal/unionstore"
 )
@@ -77,13 +78,13 @@ func (b *BufferBatchGetter) BatchGet(ctx context.Context, keys [][]byte) (map[st
 			continue
 		}
 		if !tikverr.IsErrNotFound(err) {
-			return nil, errors.Trace(err)
+			return nil, err
 		}
 		shrinkKeys = append(shrinkKeys, key)
 	}
 	storageValues, err := b.snapshot.BatchGet(ctx, shrinkKeys)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	for i, key := range keys {
 		if len(bufferValues[i]) == 0 {

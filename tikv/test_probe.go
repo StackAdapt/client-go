@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -116,6 +118,15 @@ type LockResolverProbe struct {
 func NewLockResolverProb(r *txnlock.LockResolver) *LockResolverProbe {
 	resolver := txnlock.LockResolverProbe{LockResolver: r}
 	return &LockResolverProbe{&resolver}
+}
+
+// ForceResolveLock forces to resolve a single lock. It's a helper function only for writing test.
+func (l LockResolverProbe) ForceResolveLock(ctx context.Context, lock *txnlock.Lock) error {
+	bo := retry.NewBackofferWithVars(ctx, transaction.ConfigProbe{}.GetPessimisticLockMaxBackoff(), nil)
+	// make use of forcing resolving lock
+	lock.TTL = 0
+	_, err := l.LockResolverProbe.ResolveLocks(bo, 0, []*txnlock.Lock{lock})
+	return err
 }
 
 // ResolveLock resolves single lock.

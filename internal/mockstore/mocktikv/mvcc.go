@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -39,8 +41,8 @@ import (
 	"math"
 
 	"github.com/google/btree"
-	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
+	"github.com/pkg/errors"
 	"github.com/tikv/client-go/v2/util/codec"
 )
 
@@ -91,7 +93,7 @@ func (l *mvccLock) MarshalBinary() ([]byte, error) {
 	mh.WriteNumber(&buf, l.forUpdateTS)
 	mh.WriteNumber(&buf, l.txnSize)
 	mh.WriteNumber(&buf, l.minCommitTS)
-	return buf.Bytes(), errors.Trace(mh.err)
+	return buf.Bytes(), mh.err
 }
 
 // UnmarshalBinary implements encoding.BinaryUnmarshaler interface.
@@ -106,7 +108,7 @@ func (l *mvccLock) UnmarshalBinary(data []byte) error {
 	mh.ReadNumber(buf, &l.forUpdateTS)
 	mh.ReadNumber(buf, &l.txnSize)
 	mh.ReadNumber(buf, &l.minCommitTS)
-	return errors.Trace(mh.err)
+	return mh.err
 }
 
 // MarshalBinary implements encoding.BinaryMarshaler interface.
@@ -119,7 +121,7 @@ func (v mvccValue) MarshalBinary() ([]byte, error) {
 	mh.WriteNumber(&buf, v.startTS)
 	mh.WriteNumber(&buf, v.commitTS)
 	mh.WriteSlice(&buf, v.value)
-	return buf.Bytes(), errors.Trace(mh.err)
+	return buf.Bytes(), mh.err
 }
 
 // UnmarshalBinary implements encoding.BinaryUnmarshaler interface.
@@ -132,7 +134,7 @@ func (v *mvccValue) UnmarshalBinary(data []byte) error {
 	mh.ReadNumber(buf, &v.startTS)
 	mh.ReadNumber(buf, &v.commitTS)
 	mh.ReadSlice(buf, &v.value)
-	return errors.Trace(mh.err)
+	return mh.err
 }
 
 type marshalHelper struct {
@@ -146,11 +148,10 @@ func (mh *marshalHelper) WriteSlice(buf io.Writer, slice []byte) {
 	var tmp [binary.MaxVarintLen64]byte
 	off := binary.PutUvarint(tmp[:], uint64(len(slice)))
 	if err := writeFull(buf, tmp[:off]); err != nil {
-		mh.err = errors.Trace(err)
-		return
+		mh.err = err
 	}
 	if err := writeFull(buf, slice); err != nil {
-		mh.err = errors.Trace(err)
+		mh.err = err
 	}
 }
 
@@ -160,7 +161,7 @@ func (mh *marshalHelper) WriteNumber(buf io.Writer, n interface{}) {
 	}
 	err := binary.Write(buf, binary.LittleEndian, n)
 	if err != nil {
-		mh.err = errors.Trace(err)
+		mh.err = errors.WithStack(err)
 	}
 }
 
@@ -169,7 +170,7 @@ func writeFull(w io.Writer, slice []byte) error {
 	for written < len(slice) {
 		n, err := w.Write(slice[written:])
 		if err != nil {
-			return errors.Trace(err)
+			return errors.WithStack(err)
 		}
 		written += n
 	}
@@ -182,7 +183,7 @@ func (mh *marshalHelper) ReadNumber(r io.Reader, n interface{}) {
 	}
 	err := binary.Read(r, binary.LittleEndian, n)
 	if err != nil {
-		mh.err = errors.Trace(err)
+		mh.err = errors.WithStack(err)
 	}
 }
 
@@ -192,7 +193,7 @@ func (mh *marshalHelper) ReadSlice(r *bytes.Buffer, slice *[]byte) {
 	}
 	sz, err := binary.ReadUvarint(r)
 	if err != nil {
-		mh.err = errors.Trace(err)
+		mh.err = errors.WithStack(err)
 		return
 	}
 	const c10M = 10 * 1024 * 1024
@@ -202,7 +203,7 @@ func (mh *marshalHelper) ReadSlice(r *bytes.Buffer, slice *[]byte) {
 	}
 	data := make([]byte, sz)
 	if _, err := io.ReadFull(r, data); err != nil {
-		mh.err = errors.Trace(err)
+		mh.err = errors.WithStack(err)
 		return
 	}
 	*slice = data
@@ -285,15 +286,16 @@ type MVCCStore interface {
 
 // RawKV is a key-value storage. MVCCStore can be implemented upon it with timestamp encoded into key.
 type RawKV interface {
-	RawGet(key []byte) []byte
-	RawBatchGet(keys [][]byte) [][]byte
-	RawScan(startKey, endKey []byte, limit int) []Pair        // Scan the range of [startKey, endKey)
-	RawReverseScan(startKey, endKey []byte, limit int) []Pair // Scan the range of [endKey, startKey)
-	RawPut(key, value []byte)
-	RawBatchPut(keys, values [][]byte)
-	RawDelete(key []byte)
-	RawBatchDelete(keys [][]byte)
-	RawDeleteRange(startKey, endKey []byte)
+	RawGet(cf string, key []byte) []byte
+	RawBatchGet(cf string, keys [][]byte) [][]byte
+	RawScan(cf string, startKey, endKey []byte, limit int) []Pair        // Scan the range of [startKey, endKey)
+	RawReverseScan(cf string, startKey, endKey []byte, limit int) []Pair // Scan the range of [endKey, startKey)
+	RawPut(cf string, key, value []byte)
+	RawBatchPut(cf string, keys, values [][]byte)
+	RawDelete(cf string, key []byte)
+	RawBatchDelete(cf string, keys [][]byte)
+	RawDeleteRange(cf string, startKey, endKey []byte)
+	RawCompareAndSwap(cf string, key, expectedValue, newvalue []byte) ([]byte, bool, error)
 }
 
 // MVCCDebugger is for debugging.

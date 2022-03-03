@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -38,7 +40,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/pingcap/errors"
+	"github.com/pkg/errors"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"golang.org/x/sync/singleflight"
 )
@@ -103,14 +105,14 @@ func (r reqCollapse) collapse(ctx context.Context, key string, sf *singleflight.
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		err = errors.Trace(ctx.Err())
+		err = errors.WithStack(ctx.Err())
 		return
 	case <-timer.C:
-		err = errors.Trace(context.DeadlineExceeded)
+		err = errors.WithStack(context.DeadlineExceeded)
 		return
 	case rs := <-rsC:
 		if rs.Err != nil {
-			err = errors.Trace(rs.Err)
+			err = errors.WithStack(rs.Err)
 			return
 		}
 		resp = rs.Val.(*tikvrpc.Response)

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -35,8 +37,8 @@ package locate
 import (
 	"context"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/pkg/errors"
 	"github.com/tikv/client-go/v2/util/codec"
 	pd "github.com/tikv/pd/client"
 )
@@ -84,13 +86,13 @@ func (c *CodecPDClient) ScanRegions(ctx context.Context, startKey []byte, endKey
 
 	regions, err := c.Client.ScanRegions(ctx, startKey, endKey, limit)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.WithStack(err)
 	}
 	for _, region := range regions {
 		if region != nil {
 			err = decodeRegionMetaKeyInPlace(region.Meta)
 			if err != nil {
-				return nil, errors.Trace(err)
+				return nil, err
 			}
 		}
 	}
@@ -99,30 +101,45 @@ func (c *CodecPDClient) ScanRegions(ctx context.Context, startKey []byte, endKey
 
 func processRegionResult(region *pd.Region, err error) (*pd.Region, error) {
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.WithStack(err)
 	}
 	if region == nil || region.Meta == nil {
 		return nil, nil
 	}
 	err = decodeRegionMetaKeyInPlace(region.Meta)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	return region, nil
+}
+
+// decodeError happens if the region range key is not well-formed.
+// It indicates TiKV has bugs and the client can't handle such a case,
+// so it should report the error to users soon.
+type decodeError struct {
+	error
+}
+
+func isDecodeError(err error) bool {
+	_, ok := errors.Cause(err).(*decodeError)
+	if !ok {
+		_, ok = errors.Cause(err).(decodeError)
+	}
+	return ok
 }
 
 func decodeRegionMetaKeyInPlace(r *metapb.Region) error {
 	if len(r.StartKey) != 0 {
 		_, decoded, err := codec.DecodeBytes(r.StartKey, nil)
 		if err != nil {
-			return errors.Trace(err)
+			return errors.WithStack(&decodeError{err})
 		}
 		r.StartKey = decoded
 	}
 	if len(r.EndKey) != 0 {
 		_, decoded, err := codec.DecodeBytes(r.EndKey, nil)
 		if err != nil {
-			return errors.Trace(err)
+			return errors.WithStack(&decodeError{err})
 		}
 		r.EndKey = decoded
 	}
@@ -134,14 +151,14 @@ func decodeRegionMetaKeyWithShallowCopy(r *metapb.Region) (*metapb.Region, error
 	if len(r.StartKey) != 0 {
 		_, decoded, err := codec.DecodeBytes(r.StartKey, nil)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, err
 		}
 		nr.StartKey = decoded
 	}
 	if len(r.EndKey) != 0 {
 		_, decoded, err := codec.DecodeBytes(r.EndKey, nil)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, err
 		}
 		nr.EndKey = decoded
 	}

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -41,8 +43,8 @@ import (
 	"time"
 
 	"github.com/opentracing/opentracing-go"
-	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"github.com/pkg/errors"
 	tikverr "github.com/tikv/client-go/v2/error"
 	"github.com/tikv/client-go/v2/internal/logutil"
 	"github.com/tikv/client-go/v2/kv"
@@ -55,9 +57,10 @@ import (
 type Backoffer struct {
 	ctx context.Context
 
-	fn         map[string]backoffFn
-	maxSleep   int
-	totalSleep int
+	fn            map[string]backoffFn
+	maxSleep      int
+	totalSleep    int
+	excludedSleep int
 
 	vars *kv.Variables
 	noop bool
@@ -132,13 +135,14 @@ func (b *Backoffer) BackoffWithCfgAndMaxSleep(cfg *Config, maxSleepMs int, err e
 	}
 	select {
 	case <-b.ctx.Done():
-		return errors.Trace(err)
+		return errors.WithStack(err)
 	default:
 	}
-
-	b.errors = append(b.errors, errors.Errorf("%s at %s", err.Error(), time.Now().Format(time.RFC3339Nano)))
-	b.configs = append(b.configs, cfg)
-	if b.noop || (b.maxSleep > 0 && b.totalSleep >= b.maxSleep) {
+	if b.noop {
+		return err
+	}
+	if b.maxSleep > 0 && (b.totalSleep-b.excludedSleep) >= b.maxSleep {
+		longestSleepCfg, longestSleepTime := b.longestSleepCfg()
 		errMsg := fmt.Sprintf("%s backoffer.maxSleep %dms is exceeded, errors:", cfg.String(), b.maxSleep)
 		for i, err := range b.errors {
 			// Print only last 3 errors for non-DEBUG log levels.
@@ -146,10 +150,13 @@ func (b *Backoffer) BackoffWithCfgAndMaxSleep(cfg *Config, maxSleepMs int, err e
 				errMsg += "\n" + err.Error()
 			}
 		}
+		errMsg += fmt.Sprintf("\nlongest sleep type: %s, time: %dms", longestSleepCfg.String(), longestSleepTime)
 		logutil.BgLogger().Warn(errMsg)
-		// Use the first backoff type to generate a MySQL error.
-		return b.configs[0].err
+		// Use the backoff type that contributes most to the timeout to generate a MySQL error.
+		return errors.WithStack(longestSleepCfg.err)
 	}
+	b.errors = append(b.errors, errors.Errorf("%s at %s", err.Error(), time.Now().Format(time.RFC3339Nano)))
+	b.configs = append(b.configs, cfg)
 
 	// Lazy initialize.
 	if b.fn == nil {
@@ -164,7 +171,11 @@ func (b *Backoffer) BackoffWithCfgAndMaxSleep(cfg *Config, maxSleepMs int, err e
 	if cfg.metric != nil {
 		(*cfg.metric).Observe(float64(realSleep) / 1000)
 	}
+
 	b.totalSleep += realSleep
+	if _, ok := isSleepExcluded[cfg.name]; ok {
+		b.excludedSleep += realSleep
+	}
 	if b.backoffSleepMS == nil {
 		b.backoffSleepMS = make(map[string]int)
 	}
@@ -183,7 +194,7 @@ func (b *Backoffer) BackoffWithCfgAndMaxSleep(cfg *Config, maxSleepMs int, err e
 
 	if b.vars != nil && b.vars.Killed != nil {
 		if atomic.LoadUint32(b.vars.Killed) == 1 {
-			return tikverr.ErrQueryInterrupted
+			return errors.WithStack(tikverr.ErrQueryInterrupted)
 		}
 	}
 
@@ -194,6 +205,7 @@ func (b *Backoffer) BackoffWithCfgAndMaxSleep(cfg *Config, maxSleepMs int, err e
 	logutil.Logger(b.ctx).Debug("retry later",
 		zap.Error(err),
 		zap.Int("totalSleep", b.totalSleep),
+		zap.Int("excludedSleep", b.excludedSleep),
 		zap.Int("maxSleep", b.maxSleep),
 		zap.Stringer("type", cfg),
 		zap.Reflect("txnStartTS", startTs))
@@ -211,12 +223,13 @@ func (b *Backoffer) String() string {
 // current Backoffer's context.
 func (b *Backoffer) Clone() *Backoffer {
 	return &Backoffer{
-		ctx:        b.ctx,
-		maxSleep:   b.maxSleep,
-		totalSleep: b.totalSleep,
-		errors:     b.errors,
-		vars:       b.vars,
-		parent:     b.parent,
+		ctx:           b.ctx,
+		maxSleep:      b.maxSleep,
+		totalSleep:    b.totalSleep,
+		excludedSleep: b.excludedSleep,
+		errors:        b.errors,
+		vars:          b.vars,
+		parent:        b.parent,
 	}
 }
 
@@ -225,12 +238,13 @@ func (b *Backoffer) Clone() *Backoffer {
 func (b *Backoffer) Fork() (*Backoffer, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(b.ctx)
 	return &Backoffer{
-		ctx:        ctx,
-		maxSleep:   b.maxSleep,
-		totalSleep: b.totalSleep,
-		errors:     b.errors,
-		vars:       b.vars,
-		parent:     b,
+		ctx:           ctx,
+		maxSleep:      b.maxSleep,
+		totalSleep:    b.totalSleep,
+		excludedSleep: b.excludedSleep,
+		errors:        b.errors,
+		vars:          b.vars,
+		parent:        b,
 	}, cancel
 }
 
@@ -297,6 +311,7 @@ func (b *Backoffer) ErrorsNum() int {
 func (b *Backoffer) Reset() {
 	b.fn = nil
 	b.totalSleep = 0
+	b.excludedSleep = 0
 }
 
 // ResetMaxSleep resets the sleep state and max sleep limit of the backoffer.
@@ -305,4 +320,21 @@ func (b *Backoffer) ResetMaxSleep(maxSleep int) {
 	b.Reset()
 	b.maxSleep = maxSleep
 	b.withVars(b.vars)
+}
+
+func (b *Backoffer) longestSleepCfg() (*Config, int) {
+	candidate := ""
+	maxSleep := 0
+	for cfgName, sleepTime := range b.backoffSleepMS {
+		if _, ok := isSleepExcluded[cfgName]; sleepTime > maxSleep && !ok {
+			maxSleep = sleepTime
+			candidate = cfgName
+		}
+	}
+	for _, cfg := range b.configs {
+		if cfg.name == candidate {
+			return cfg, maxSleep
+		}
+	}
+	return nil, 0
 }

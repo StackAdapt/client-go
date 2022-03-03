@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -40,12 +42,12 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/kv"
 	txndriver "github.com/pingcap/tidb/store/driver/txn"
 	"github.com/pingcap/tidb/store/mockstore/unistore"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/config"
+	"github.com/tikv/client-go/v2/testutils"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/transaction"
 	"github.com/tikv/client-go/v2/util/codec"
@@ -64,19 +66,25 @@ func NewTestStore(t *testing.T) *tikv.KVStore {
 	}
 
 	if *withTiKV {
-		addrs := strings.Split(*pdAddrs, ",")
-		pdClient, err := pd.NewClient(addrs, pd.SecurityOption{})
-		require.Nil(t, err)
-		var securityConfig config.Security
-		tlsConfig, err := securityConfig.ToTLSConfig()
-		require.Nil(t, err)
-		spKV, err := tikv.NewEtcdSafePointKV(addrs, tlsConfig)
-		require.Nil(t, err)
-		store, err := tikv.NewKVStore("test-store", &tikv.CodecPDClient{Client: pdClient}, spKV, tikv.NewRPCClient(securityConfig))
-		require.Nil(t, err)
-		err = clearStorage(store)
-		require.Nil(t, err)
-		return store
+		return newTiKVStore(t)
+	}
+	client, cluster, pdClient, err := testutils.NewMockTiKV("", nil)
+	require.NoError(t, err)
+	testutils.BootstrapWithSingleStore(cluster)
+	store, err := tikv.NewTestTiKVStore(client, pdClient, nil, nil, 0)
+	require.Nil(t, err)
+	return store
+}
+
+// NewTestUniStore creates a KVStore (using tidb/unistore) for testing purpose.
+// TODO: switch to use mockstore and remove it.
+func NewTestUniStore(t *testing.T) *tikv.KVStore {
+	if !flag.Parsed() {
+		flag.Parse()
+	}
+
+	if *withTiKV {
+		return newTiKVStore(t)
 	}
 	client, pdClient, cluster, err := unistore.New("")
 	require.Nil(t, err)
@@ -86,19 +94,35 @@ func NewTestStore(t *testing.T) *tikv.KVStore {
 	return store
 }
 
+func newTiKVStore(t *testing.T) *tikv.KVStore {
+	addrs := strings.Split(*pdAddrs, ",")
+	pdClient, err := pd.NewClient(addrs, pd.SecurityOption{})
+	require.Nil(t, err)
+	var securityConfig config.Security
+	tlsConfig, err := securityConfig.ToTLSConfig()
+	require.Nil(t, err)
+	spKV, err := tikv.NewEtcdSafePointKV(addrs, tlsConfig)
+	require.Nil(t, err)
+	store, err := tikv.NewKVStore("test-store", &tikv.CodecPDClient{Client: pdClient}, spKV, tikv.NewRPCClient())
+	require.Nil(t, err)
+	err = clearStorage(store)
+	require.Nil(t, err)
+	return store
+}
+
 func clearStorage(store *tikv.KVStore) error {
 	txn, err := store.Begin()
 	if err != nil {
-		return errors.Trace(err)
+		return err
 	}
 	iter, err := txn.Iter(nil, nil)
 	if err != nil {
-		return errors.Trace(err)
+		return err
 	}
 	for iter.Valid() {
 		txn.Delete(iter.Key())
 		if err := iter.Next(); err != nil {
-			return errors.Trace(err)
+			return err
 		}
 	}
 	return txn.Commit(context.Background())

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,10 +28,11 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package tikv_test
+package raw_tikv_test
 
 import (
 	"bytes"
@@ -38,7 +40,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/pingcap/tidb/store/mockstore/unistore"
 	"github.com/stretchr/testify/suite"
 	"github.com/tikv/client-go/v2/rawkv"
 	"github.com/tikv/client-go/v2/testutils"
@@ -57,9 +58,10 @@ type testRawKVSuite struct {
 }
 
 func (s *testRawKVSuite) SetupTest() {
-	client, pdClient, cluster, err := unistore.New("")
+	client, cluster, pdClient, err := testutils.NewMockTiKV("", nil)
+	s.Require().NoError(err)
 	s.Require().Nil(err)
-	unistore.BootstrapWithSingleStore(cluster)
+	testutils.BootstrapWithSingleStore(cluster)
 	s.cluster = cluster
 	s.client = rawkv.ClientProbe{Client: &rawkv.Client{}}
 	s.client.SetPDClient(pdClient)

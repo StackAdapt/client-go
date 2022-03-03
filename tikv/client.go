@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -41,13 +43,22 @@ import (
 // It should not be used after calling Close().
 type Client = client.Client
 
+// ClientOpt defines the option to create RPC client.
+type ClientOpt = client.Opt
+
+// WithSecurity is used to set security config.
+func WithSecurity(security config.Security) ClientOpt {
+	return client.WithSecurity(security)
+}
+
 // Timeout durations.
 const (
-	ReadTimeoutMedium = client.ReadTimeoutMedium
-	ReadTimeoutShort  = client.ReadTimeoutShort
+	ReadTimeoutMedium     = client.ReadTimeoutMedium
+	ReadTimeoutShort      = client.ReadTimeoutShort
+	MaxWriteExecutionTime = client.MaxWriteExecutionTime
 )
 
 // NewRPCClient creates a client that manages connections and rpc calls with tikv-servers.
-func NewRPCClient(security config.Security, opts ...func(c *client.RPCClient)) *client.RPCClient {
-	return client.NewRPCClient(security, opts...)
+func NewRPCClient(opts ...ClientOpt) *client.RPCClient {
+	return client.NewRPCClient(opts...)
 }

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -41,9 +43,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/tidb/store/mockstore/unistore"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/suite"
 	tikverr "github.com/tikv/client-go/v2/error"
 	"github.com/tikv/client-go/v2/kv"
@@ -253,7 +255,7 @@ func (s *testAsyncCommitSuite) TestCheckSecondaries() {
 	status := lockutil.NewLockStatus(nil, true, ts)
 
 	resolver := tikv.NewLockResolverProb(s.store.GetLockResolver())
-	err = resolver.ResolveLockAsync(s.bo, lock, status)
+	err = resolver.ResolveAsyncCommitLock(s.bo, lock, status)
 	s.Nil(err)
 	currentTS, err := s.store.GetOracle().GetTimestamp(context.Background(), &oracle.Option{TxnScope: oracle.GlobalTxnScope})
 	s.Nil(err)
@@ -332,7 +334,7 @@ func (s *testAsyncCommitSuite) TestCheckSecondaries() {
 
 	_ = s.beginAsyncCommit()
 
-	err = resolver.ResolveLockAsync(s.bo, lock, status)
+	err = resolver.ResolveAsyncCommitLock(s.bo, lock, status)
 	s.Nil(err)
 	s.Equal(gotCheckA, int64(1))
 	s.Equal(gotCheckB, int64(1))
@@ -369,7 +371,7 @@ func (s *testAsyncCommitSuite) TestCheckSecondaries() {
 	lock.TxnID = ts
 	lock.MinCommitTS = ts + 5
 
-	err = resolver.ResolveLockAsync(s.bo, lock, status)
+	err = resolver.ResolveAsyncCommitLock(s.bo, lock, status)
 	s.Nil(err)
 	s.Equal(gotCheckA, int64(1))
 	s.Equal(gotCheckB, int64(1))

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -37,8 +39,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
+	"github.com/pkg/errors"
 	tikverr "github.com/tikv/client-go/v2/error"
 	"github.com/tikv/client-go/v2/internal/client"
 	"github.com/tikv/client-go/v2/internal/locate"
@@ -117,24 +119,25 @@ func (t *DeleteRangeTask) sendReqOnRange(ctx context.Context, r kv.KeyRange) (Ta
 	for {
 		select {
 		case <-ctx.Done():
-			return stat, errors.Trace(ctx.Err())
+			return stat, errors.WithStack(ctx.Err())
 		default:
 		}
 
-		if bytes.Compare(startKey, rangeEndKey) >= 0 {
+		if len(rangeEndKey) > 0 && bytes.Compare(startKey, rangeEndKey) >= 0 {
 			break
 		}
 
 		bo := retry.NewBackofferWithVars(ctx, deleteRangeOneRegionMaxBackoff, nil)
 		loc, err := t.store.GetRegionCache().LocateKey(bo, startKey)
 		if err != nil {
-			return stat, errors.Trace(err)
+			return stat, err
 		}
 
 		// Delete to the end of the region, except if it's the last region overlapping the range
 		endKey := loc.EndKey
+		isLast := len(endKey) == 0 || (len(rangeEndKey) > 0 && bytes.Compare(endKey, rangeEndKey) >= 0)
 		// If it is the last region
-		if loc.Contains(rangeEndKey) {
+		if isLast {
 			endKey = rangeEndKey
 		}
 
@@ -146,27 +149,30 @@ func (t *DeleteRangeTask) sendReqOnRange(ctx context.Context, r kv.KeyRange) (Ta
 
 		resp, err := t.store.SendReq(bo, req, loc.Region, client.ReadTimeoutMedium)
 		if err != nil {
-			return stat, errors.Trace(err)
+			return stat, err
 		}
 		regionErr, err := resp.GetRegionError()
 		if err != nil {
-			return stat, errors.Trace(err)
+			return stat, err
 		}
 		if regionErr != nil {
 			err = bo.Backoff(retry.BoRegionMiss, errors.New(regionErr.String()))
 			if err != nil {
-				return stat, errors.Trace(err)
+				return stat, err
 			}
 			continue
 		}
 		if resp.Resp == nil {
-			return stat, errors.Trace(tikverr.ErrBodyMissing)
+			return stat, errors.WithStack(tikverr.ErrBodyMissing)
 		}
 		deleteRangeResp := resp.Resp.(*kvrpcpb.DeleteRangeResponse)
 		if err := deleteRangeResp.GetError(); err != "" {
 			return stat, errors.Errorf("unexpected delete range err: %v", err)
 		}
 		stat.CompletedRegions++
+		if isLast {
+			break
+		}
 		startKey = endKey
 	}
 

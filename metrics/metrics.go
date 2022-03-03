@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -42,7 +44,7 @@ var (
 	TiKVTxnCmdHistogram                      *prometheus.HistogramVec
 	TiKVBackoffHistogram                     *prometheus.HistogramVec
 	TiKVSendReqHistogram                     *prometheus.HistogramVec
-	TiKVCoprocessorHistogram                 prometheus.Histogram
+	TiKVCoprocessorHistogram                 *prometheus.HistogramVec
 	TiKVLockResolverCounter                  *prometheus.CounterVec
 	TiKVRegionErrorCounter                   *prometheus.CounterVec
 	TiKVTxnWriteKVCountHistogram             prometheus.Histogram
@@ -64,6 +66,7 @@ var (
 	TiKVBatchClientUnavailable               prometheus.Histogram
 	TiKVBatchClientWaitEstablish             prometheus.Histogram
 	TiKVBatchClientRecycle                   prometheus.Histogram
+	TiKVBatchRecvLatency                     *prometheus.HistogramVec
 	TiKVRangeTaskStats                       *prometheus.GaugeVec
 	TiKVRangeTaskPushDuration                *prometheus.HistogramVec
 	TiKVTokenWaitDuration                    prometheus.Histogram
@@ -86,7 +89,9 @@ var (
 	TiKVTxnCommitBackoffSeconds              prometheus.Histogram
 	TiKVTxnCommitBackoffCount                prometheus.Histogram
 	TiKVSmallReadDuration                    prometheus.Histogram
+	TiKVReadThroughput                       prometheus.Histogram
 	TiKVUnsafeDestroyRangeFailuresCounterVec *prometheus.CounterVec
+	TiKVPrewriteAssertionUsageCounter        *prometheus.CounterVec
 )
 
 // Label constants.
@@ -105,6 +110,7 @@ const (
 	LblAddress         = "address"
 	LblFromStore       = "from_store"
 	LblToStore         = "to_store"
+	LblStaleRead       = "stale_read"
 )
 
 func initMetrics(namespace, subsystem string) {
@@ -133,16 +139,16 @@ func initMetrics(namespace, subsystem string) {
 			Name:      "request_seconds",
 			Help:      "Bucketed histogram of sending request duration.",
 			Buckets:   prometheus.ExponentialBuckets(0.0005, 2, 29), // 0.5ms ~ 1.5days
-		}, []string{LblType, LblStore})
+		}, []string{LblType, LblStore, LblStaleRead})
 
-	TiKVCoprocessorHistogram = prometheus.NewHistogram(
+	TiKVCoprocessorHistogram = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "cop_duration_seconds",
 			Help:      "Run duration of a single coprocessor task, includes backoff time.",
 			Buckets:   prometheus.ExponentialBuckets(0.0005, 2, 29), // 0.5ms ~ 1.5days
-		})
+		}, []string{LblStore, LblStaleRead})
 
 	TiKVLockResolverCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -273,6 +279,15 @@ func initMetrics(namespace, subsystem string) {
 			Help:      "batch send latency",
 		})
 
+	TiKVBatchRecvLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "batch_recv_latency",
+			Buckets:   prometheus.ExponentialBuckets(1000, 2, 34), // 1us ~ 8000s
+			Help:      "batch recv latency",
+		}, []string{LblResult})
+
 	TiKVBatchWaitOverLoad = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: namespace,
@@ -286,7 +301,7 @@ func initMetrics(namespace, subsystem string) {
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "batch_pending_requests",
-			Buckets:   prometheus.ExponentialBuckets(1, 2, 8),
+			Buckets:   prometheus.ExponentialBuckets(1, 2, 11), // 1 ~ 1024
 			Help:      "number of requests pending in the batch channel",
 		}, []string{"store"})
 
@@ -295,7 +310,7 @@ func initMetrics(namespace, subsystem string) {
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "batch_requests",
-			Buckets:   prometheus.ExponentialBuckets(1, 2, 8),
+			Buckets:   prometheus.ExponentialBuckets(1, 2, 11), // 1 ~ 1024
 			Help:      "number of requests in one batch",
 		}, []string{"store"})
 
@@ -510,12 +525,29 @@ func initMetrics(namespace, subsystem string) {
 			Buckets:   prometheus.ExponentialBuckets(0.0005, 2, 28), // 0.5ms ~ 74h
 		})
 
+	TiKVReadThroughput = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: namespace,
+			Subsystem: "sli",
+			Name:      "tikv_read_throughput",
+			Help:      "Read throughput of TiKV read in Bytes/s.",
+			Buckets:   prometheus.ExponentialBuckets(1024, 2, 13), // 1MB/s ~ 4GB/s
+		})
+
 	TiKVUnsafeDestroyRangeFailuresCounterVec = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "gc_unsafe_destroy_range_failures",
 			Help:      "Counter of unsafe destroyrange failures",
+		}, []string{LblType})
+
+	TiKVPrewriteAssertionUsageCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "prewrite_assertion_count",
+			Help:      "Counter of assertions used in prewrite requests",
 		}, []string{LblType})
 
 	initShortcuts()
@@ -552,6 +584,7 @@ func RegisterMetrics() {
 	prometheus.MustRegister(TiKVStatusCounter)
 	prometheus.MustRegister(TiKVBatchWaitDuration)
 	prometheus.MustRegister(TiKVBatchSendLatency)
+	prometheus.MustRegister(TiKVBatchRecvLatency)
 	prometheus.MustRegister(TiKVBatchWaitOverLoad)
 	prometheus.MustRegister(TiKVBatchPendingRequests)
 	prometheus.MustRegister(TiKVBatchRequests)
@@ -580,6 +613,9 @@ func RegisterMetrics() {
 	prometheus.MustRegister(TiKVTxnCommitBackoffSeconds)
 	prometheus.MustRegister(TiKVTxnCommitBackoffCount)
 	prometheus.MustRegister(TiKVSmallReadDuration)
+	prometheus.MustRegister(TiKVReadThroughput)
+	prometheus.MustRegister(TiKVUnsafeDestroyRangeFailuresCounterVec)
+	prometheus.MustRegister(TiKVPrewriteAssertionUsageCounter)
 }
 
 // readCounter reads the value of a prometheus.Counter.
@@ -621,11 +657,18 @@ func GetTxnCommitCounter() TxnCommitCounter {
 	}
 }
 
-const smallTxnAffectRow = 20
+const (
+	smallTxnReadRow  = 20
+	smallTxnReadSize = 1 * 1024 * 1024 //1MB
+)
 
 // ObserveReadSLI observes the read SLI metric.
-func ObserveReadSLI(readKeys uint64, readTime float64) {
-	if readKeys <= smallTxnAffectRow && readKeys != 0 && readTime != 0 {
-		TiKVSmallReadDuration.Observe(readTime)
+func ObserveReadSLI(readKeys uint64, readTime float64, readSize float64) {
+	if readKeys != 0 && readTime != 0 {
+		if readKeys <= smallTxnReadRow && readSize < smallTxnReadSize {
+			TiKVSmallReadDuration.Observe(readTime)
+		} else {
+			TiKVReadThroughput.Observe(readSize / readTime)
+		}
 	}
 }

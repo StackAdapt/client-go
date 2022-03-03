@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,13 +28,13 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package config
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -48,8 +49,8 @@ func TestTLSConfig(t *testing.T) {
 	keyFile := filepath.Join(filepath.Dir(localFile), "key.pem")
 	perm := os.FileMode(0666)
 
-	assert.Nil(t, ioutil.WriteFile(certFile, []byte(cert), perm))
-	assert.Nil(t, ioutil.WriteFile(keyFile, []byte(key), perm))
+	assert.Nil(t, os.WriteFile(certFile, []byte(cert), perm))
+	assert.Nil(t, os.WriteFile(keyFile, []byte(key), perm))
 
 	security := Security{
 		ClusterSSLCA:   certFile,

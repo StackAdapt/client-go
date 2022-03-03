@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -97,6 +99,11 @@ func (c *Config) String() string {
 	return c.name
 }
 
+// SetErrors sets a more detailed error instead of the default bo config.
+func (c *Config) SetErrors(err error) {
+	c.err = err
+}
+
 const txnLockFastName = "txnLockFast"
 
 // Backoff Config variables.
@@ -104,12 +111,13 @@ var (
 	// TODO: distinguish tikv and tiflash in metrics
 	BoTiKVRPC    = NewConfig("tikvRPC", &metrics.BackoffHistogramRPC, NewBackoffFnCfg(100, 2000, EqualJitter), tikverr.ErrTiKVServerTimeout)
 	BoTiFlashRPC = NewConfig("tiflashRPC", &metrics.BackoffHistogramRPC, NewBackoffFnCfg(100, 2000, EqualJitter), tikverr.ErrTiFlashServerTimeout)
-	BoTxnLock    = NewConfig("txnLock", &metrics.BackoffHistogramLock, NewBackoffFnCfg(200, 3000, EqualJitter), tikverr.ErrResolveLockTimeout)
+	BoTxnLock    = NewConfig("txnLock", &metrics.BackoffHistogramLock, NewBackoffFnCfg(100, 3000, EqualJitter), tikverr.ErrResolveLockTimeout)
 	BoPDRPC      = NewConfig("pdRPC", &metrics.BackoffHistogramPD, NewBackoffFnCfg(500, 3000, EqualJitter), tikverr.NewErrPDServerTimeout(""))
 	// change base time to 2ms, because it may recover soon.
 	BoRegionMiss              = NewConfig("regionMiss", &metrics.BackoffHistogramRegionMiss, NewBackoffFnCfg(2, 500, NoJitter), tikverr.ErrRegionUnavailable)
 	BoRegionScheduling        = NewConfig("regionScheduling", &metrics.BackoffHistogramRegionScheduling, NewBackoffFnCfg(2, 500, NoJitter), tikverr.ErrRegionUnavailable)
 	BoTiKVServerBusy          = NewConfig("tikvServerBusy", &metrics.BackoffHistogramServerBusy, NewBackoffFnCfg(2000, 10000, EqualJitter), tikverr.ErrTiKVServerBusy)
+	BoTiKVDiskFull            = NewConfig("tikvDiskFull", &metrics.BackoffHistogramTiKVDiskFull, NewBackoffFnCfg(500, 5000, NoJitter), tikverr.ErrTiKVDiskFull)
 	BoTiFlashServerBusy       = NewConfig("tiflashServerBusy", &metrics.BackoffHistogramServerBusy, NewBackoffFnCfg(2000, 10000, EqualJitter), tikverr.ErrTiFlashServerBusy)
 	BoTxnNotFound             = NewConfig("txnNotFound", &metrics.BackoffHistogramEmpty, NewBackoffFnCfg(2, 500, NoJitter), tikverr.ErrResolveLockTimeout)
 	BoStaleCmd                = NewConfig("staleCommand", &metrics.BackoffHistogramStaleCmd, NewBackoffFnCfg(2, 1000, NoJitter), tikverr.ErrTiKVStaleCommand)
@@ -119,6 +127,11 @@ var (
 	// TxnLockFast's `base` load from vars.BackoffLockFast when create BackoffFn.
 	BoTxnLockFast = NewConfig(txnLockFastName, &metrics.BackoffHistogramLockFast, NewBackoffFnCfg(2, 3000, EqualJitter), tikverr.ErrResolveLockTimeout)
 )
+
+var isSleepExcluded = map[string]struct{}{
+	BoTiKVServerBusy.name: {},
+	// add BoTiFlashServerBusy if appropriate
+}
 
 const (
 	// NoJitter makes the backoff sequence strict exponential.

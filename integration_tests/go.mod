@@ -4,15 +4,16 @@ go 1.16
 
 require (
 	github.com/ninedraft/israce v0.0.3
-	github.com/pingcap/errors v0.11.5-0.20210425183316-da1aaba5fb63
-	github.com/pingcap/failpoint v0.0.0-20210316064728-7acb0f0a3dfd
-	github.com/pingcap/kvproto v0.0.0-20210722091755-91a52cd9e8db
-	github.com/pingcap/parser v0.0.0-20210728060616-75cff0c906d2
-	github.com/pingcap/tidb v1.1.0-beta.0.20210729073017-a27d306e65a0
+	github.com/pingcap/errors v0.11.5-0.20211224045212-9687c2b0f87c
+	github.com/pingcap/failpoint v0.0.0-20210918120811-547c13e3eb00
+	github.com/pingcap/kvproto v0.0.0-20220215045702-d229fcc888c8
+	github.com/pingcap/tidb v1.1.0-beta.0.20220222031143-5988d0b2f46e
+	github.com/pingcap/tidb/parser v0.0.0-20220222031143-5988d0b2f46e // indirect
+	github.com/pkg/errors v0.9.1
 	github.com/stretchr/testify v1.7.0
 	github.com/tikv/client-go/v2 v2.0.0
-	github.com/tikv/pd v1.1.0-beta.0.20210323121136-78679e5e209d
-	go.uber.org/goleak v1.1.10
+	github.com/tikv/pd/client v0.0.0-20220216080339-1b8f82378ee7
+	go.uber.org/goleak v1.1.12
 )
 
 replace github.com/tikv/client-go/v2 => ../

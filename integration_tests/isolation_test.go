@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,9 +28,11 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !race
 // +build !race
 
 package tikv_test
@@ -42,8 +45,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/kv"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/suite"
+	kverr "github.com/tikv/client-go/v2/error"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/transaction"
 )
@@ -121,7 +125,8 @@ func (s *testIsolationSuite) GetWithRetry(k []byte) readRecord {
 				value:   val,
 			}
 		}
-		s.True(kv.IsTxnRetryableError(err))
+		var e *kverr.ErrRetryable
+		s.True(errors.As(err, &e))
 	}
 }
 

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -39,7 +41,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pingcap/errors"
+	"github.com/pkg/errors"
 	"github.com/tikv/client-go/v2/internal/logutil"
 	"github.com/tikv/client-go/v2/internal/retry"
 	"github.com/tikv/client-go/v2/kv"
@@ -194,7 +196,7 @@ Loop:
 				zap.String("endKey", kv.StrKey(endKey)),
 				zap.Duration("cost time", time.Since(startTime)),
 				zap.Error(err))
-			return errors.Trace(err)
+			return err
 		}
 		task := &kv.KeyRange{
 			StartKey: key,
@@ -234,7 +236,7 @@ Loop:
 				zap.String("endKey", kv.StrKey(endKey)),
 				zap.Duration("cost time", time.Since(startTime)),
 				zap.Error(w.err))
-			return errors.Trace(w.err)
+			return errors.WithStack(w.err)
 		}
 	}
 

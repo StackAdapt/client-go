@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -34,13 +36,14 @@ package tikv_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/ninedraft/israce"
-	"github.com/pingcap/tidb/kv"
 	"github.com/stretchr/testify/suite"
+	kverr "github.com/tikv/client-go/v2/error"
 	tikvstore "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/tikv"
 )
@@ -148,7 +151,8 @@ func (s *testTiclientSuite) TestLargeRequest() {
 	s.NotNil(err)
 	err = txn.Commit(context.Background())
 	s.Nil(err)
-	s.False(kv.IsTxnRetryableError(err))
+	var retryableErr *kverr.ErrRetryable
+	s.False(errors.As(err, &retryableErr))
 }
 
 func (s *testTiclientSuite) TestSplitRegionIn2PC() {
@@ -197,7 +201,7 @@ func (s *testTiclientSuite) TestSplitRegionIn2PC() {
 		txn := s.beginTxn()
 		if m == "pessimistic" {
 			txn.SetPessimistic(true)
-			lockCtx := &kv.LockCtx{}
+			lockCtx := &tikvstore.LockCtx{}
 			lockCtx.ForUpdateTS = txn.StartTS()
 			keys := make([][]byte, 0, preSplitThresholdInTest)
 			for i := 0; i < preSplitThresholdInTest; i++ {

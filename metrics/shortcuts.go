@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -59,6 +61,7 @@ var (
 	BackoffHistogramRegionMiss       prometheus.Observer
 	BackoffHistogramRegionScheduling prometheus.Observer
 	BackoffHistogramServerBusy       prometheus.Observer
+	BackoffHistogramTiKVDiskFull     prometheus.Observer
 	BackoffHistogramStaleCmd         prometheus.Observer
 	BackoffHistogramDataNotReady     prometheus.Observer
 	BackoffHistogramEmpty            prometheus.Observer
@@ -117,6 +120,14 @@ var (
 	OnePCTxnCounterOk       prometheus.Counter
 	OnePCTxnCounterError    prometheus.Counter
 	OnePCTxnCounterFallback prometheus.Counter
+
+	BatchRecvHistogramOK    prometheus.Observer
+	BatchRecvHistogramError prometheus.Observer
+
+	PrewriteAssertionUsageCounterNone     prometheus.Counter
+	PrewriteAssertionUsageCounterExist    prometheus.Counter
+	PrewriteAssertionUsageCounterNotExist prometheus.Counter
+	PrewriteAssertionUsageCounterUnknown  prometheus.Counter
 )
 
 func initShortcuts() {
@@ -143,6 +154,7 @@ func initShortcuts() {
 	BackoffHistogramRegionMiss = TiKVBackoffHistogram.WithLabelValues("regionMiss")
 	BackoffHistogramRegionScheduling = TiKVBackoffHistogram.WithLabelValues("regionScheduling")
 	BackoffHistogramServerBusy = TiKVBackoffHistogram.WithLabelValues("serverBusy")
+	BackoffHistogramTiKVDiskFull = TiKVBackoffHistogram.WithLabelValues("tikvDiskFull")
 	BackoffHistogramStaleCmd = TiKVBackoffHistogram.WithLabelValues("staleCommand")
 	BackoffHistogramDataNotReady = TiKVBackoffHistogram.WithLabelValues("dataNotReady")
 	BackoffHistogramEmpty = TiKVBackoffHistogram.WithLabelValues("")
@@ -201,4 +213,12 @@ func initShortcuts() {
 	OnePCTxnCounterOk = TiKVOnePCTxnCounter.WithLabelValues("ok")
 	OnePCTxnCounterError = TiKVOnePCTxnCounter.WithLabelValues("err")
 	OnePCTxnCounterFallback = TiKVOnePCTxnCounter.WithLabelValues("fallback")
+
+	BatchRecvHistogramOK = TiKVBatchRecvLatency.WithLabelValues("ok")
+	BatchRecvHistogramError = TiKVBatchRecvLatency.WithLabelValues("err")
+
+	PrewriteAssertionUsageCounterNone = TiKVPrewriteAssertionUsageCounter.WithLabelValues("none")
+	PrewriteAssertionUsageCounterExist = TiKVPrewriteAssertionUsageCounter.WithLabelValues("exist")
+	PrewriteAssertionUsageCounterNotExist = TiKVPrewriteAssertionUsageCounter.WithLabelValues("not-exist")
+	PrewriteAssertionUsageCounterUnknown = TiKVPrewriteAssertionUsageCounter.WithLabelValues("unknown")
 }

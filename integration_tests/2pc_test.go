@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -29,6 +30,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -46,11 +48,9 @@ import (
 	"time"
 
 	"github.com/ninedraft/israce"
-	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
-	"github.com/pingcap/parser/terror"
-	drivertxn "github.com/pingcap/tidb/store/driver/txn"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/suite"
 	"github.com/tikv/client-go/v2/config"
 	tikverr "github.com/tikv/client-go/v2/error"
@@ -82,12 +82,10 @@ type testCommitterSuite struct {
 func (s *testCommitterSuite) SetupSuite() {
 	atomic.StoreUint64(&transaction.ManagedLockTTL, 3000) // 3s
 	atomic.StoreUint64(&transaction.CommitMaxBackoff, 1000)
-	atomic.StoreUint64(&transaction.VeryLongMaxBackoff, 1000)
 }
 
 func (s *testCommitterSuite) TearDownSuite() {
 	atomic.StoreUint64(&transaction.CommitMaxBackoff, 20000)
-	atomic.StoreUint64(&transaction.VeryLongMaxBackoff, 600000)
 }
 
 func (s *testCommitterSuite) SetupTest() {
@@ -216,6 +214,26 @@ func (s *testCommitterSuite) TestCommitRollback() {
 		"b": "b",
 		"c": "c2",
 	})
+}
+
+func (s *testCommitterSuite) TestCommitOnTiKVDiskFullOpt() {
+	s.Nil(failpoint.Enable("tikvclient/rpcAllowedOnAlmostFull", `return("true")`))
+	txn := s.begin()
+	txn.SetDiskFullOpt(kvrpcpb.DiskFullOpt_AllowedOnAlmostFull)
+	txn.Set([]byte("a"), []byte("a1"))
+	err := txn.Commit(context.Background())
+	s.Nil(err)
+	s.checkValues(map[string]string{"a": "a1"})
+	s.Nil(failpoint.Disable("tikvclient/rpcAllowedOnAlmostFull"))
+
+	s.Nil(failpoint.Enable("tikvclient/rpcAllowedOnAlmostFull", `return("true")`))
+	txn = s.begin()
+	txn.Set([]byte("c"), []byte("c1"))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err = txn.Commit(ctx)
+	s.NotNil(err)
+	s.Nil(failpoint.Disable("tikvclient/rpcAllowedOnAlmostFull"))
 }
 
 func (s *testCommitterSuite) TestPrewriteRollback() {
@@ -612,12 +630,12 @@ func (s *testCommitterSuite) TestRejectCommitTS() {
 	// Use max.Uint64 to read the data and success.
 	// That means the final commitTS > startTS+2, it's not the one we provide.
 	// So we cover the rety commitTS logic.
-	txn1, err := s.store.BeginWithOption(tikv.DefaultStartTSOption().SetStartTS(committer.GetStartTS() + 2))
+	txn1, err := s.store.KVStore.Begin(tikv.WithStartTS(committer.GetStartTS() + 2))
 	s.Nil(err)
 	_, err = txn1.Get(bo.GetCtx(), []byte("x"))
 	s.True(tikverr.IsErrNotFound(err))
 
-	txn2, err := s.store.BeginWithOption(tikv.DefaultStartTSOption().SetStartTS(math.MaxUint64))
+	txn2, err := s.store.KVStore.Begin(tikv.WithStartTS(math.MaxUint64))
 	s.Nil(err)
 	val, err := txn2.Get(bo.GetCtx(), []byte("x"))
 	s.Nil(err)
@@ -727,6 +745,39 @@ func (s *testCommitterSuite) TestPessimisticLockReturnValues() {
 	s.Len(lockCtx.Values, 2)
 	s.Equal(lockCtx.Values[string(key)].Value, key)
 	s.Equal(lockCtx.Values[string(key2)].Value, key2)
+}
+
+func (s *testCommitterSuite) TestPessimisticLockCheckExistence() {
+	key := []byte("key")
+	key2 := []byte("key2")
+	txn := s.begin()
+	s.Nil(txn.Set(key, key))
+	s.Nil(txn.Commit(context.Background()))
+
+	txn = s.begin()
+	txn.SetPessimistic(true)
+	lockCtx := &kv.LockCtx{ForUpdateTS: txn.StartTS(), WaitStartTime: time.Now()}
+	lockCtx.InitCheckExistence(2)
+	s.Nil(txn.LockKeys(context.Background(), lockCtx, key, key2))
+	s.Len(lockCtx.Values, 2)
+	s.Empty(lockCtx.Values[string(key)].Value)
+	s.True(lockCtx.Values[string(key)].Exists)
+	s.Empty(lockCtx.Values[string(key2)].Value)
+	s.False(lockCtx.Values[string(key2)].Exists)
+	s.Nil(txn.Rollback())
+
+	txn = s.begin()
+	txn.SetPessimistic(true)
+	lockCtx = &kv.LockCtx{ForUpdateTS: txn.StartTS(), WaitStartTime: time.Now()}
+	lockCtx.InitCheckExistence(2)
+	lockCtx.InitReturnValues(2)
+	s.Nil(txn.LockKeys(context.Background(), lockCtx, key, key2))
+	s.Len(lockCtx.Values, 2)
+	s.Equal(lockCtx.Values[string(key)].Value, key)
+	s.True(lockCtx.Values[string(key)].Exists)
+	s.Empty(lockCtx.Values[string(key2)].Value)
+	s.False(lockCtx.Values[string(key2)].Exists)
+	s.Nil(txn.Rollback())
 }
 
 // TestElapsedTTL tests that elapsed time is correct even if ts physical time is greater than local time.
@@ -1034,15 +1085,26 @@ func (s *testCommitterSuite) TestPessimisticLockPrimary() {
 	s.Nil(failpoint.Disable("tikvclient/txnNotFoundRetTTL"))
 	s.Nil(err)
 	waitErr := <-doneCh
-	s.Equal(tikverr.ErrLockWaitTimeout, waitErr)
+	s.Equal(tikverr.ErrLockWaitTimeout, errors.Unwrap(waitErr))
+}
+
+type kvFilter struct{}
+
+func (f kvFilter) IsUnnecessaryKeyValue(key, value []byte, flags kv.KeyFlags) (bool, error) {
+	untouched := bytes.Equal(key, []byte("t00000001_i000000001"))
+	if untouched && flags.HasPresumeKeyNotExists() {
+		return false, errors.New("unexpected path the untouched key value with PresumeKeyNotExists flag")
+	}
+	return untouched, nil
 }
 
 func (s *testCommitterSuite) TestResolvePessimisticLock() {
 	untouchedIndexKey := []byte("t00000001_i000000001")
 	untouchedIndexValue := []byte{0, 0, 0, 0, 0, 0, 0, 1, 49}
 	noValueIndexKey := []byte("t00000001_i000000002")
+
 	txn := s.begin()
-	txn.SetKVFilter(drivertxn.TiDBKVFilter{})
+	txn.SetKVFilter(kvFilter{})
 	err := txn.Set(untouchedIndexKey, untouchedIndexValue)
 	s.Nil(err)
 	lockCtx := kv.NewLockCtx(txn.StartTS(), kv.LockNoWait, time.Now())
@@ -1198,7 +1260,7 @@ func (s *testCommitterSuite) TestResolveMixed() {
 	// stop txn ttl manager and remove primary key, make the other keys left behind
 	committer.CloseTTLManager()
 	muts := transaction.NewPlainMutations(1)
-	muts.Push(kvrpcpb.Op_Lock, pk, nil, true)
+	muts.Push(kvrpcpb.Op_Lock, pk, nil, true, false, false)
 	err = committer.PessimisticRollbackMutations(context.Background(), &muts)
 	s.Nil(err)
 
@@ -1415,7 +1477,7 @@ func (s *testCommitterSuite) TestFailCommitPrimaryRpcErrors() {
 	s.Nil(err)
 	err = t1.Commit(context.Background())
 	s.NotNil(err)
-	s.True(terror.ErrorEqual(err, terror.ErrResultUndetermined), errors.ErrorStack(err))
+	s.True(tikverr.IsErrorUndetermined(err), errors.WithStack(err))
 
 	// We don't need to call "Rollback" after "Commit" fails.
 	err = t1.Rollback()
@@ -1436,7 +1498,7 @@ func (s *testCommitterSuite) TestFailCommitPrimaryRegionError() {
 	s.Nil(err)
 	err = t2.Commit(context.Background())
 	s.NotNil(err)
-	s.True(terror.ErrorNotEqual(err, terror.ErrResultUndetermined))
+	s.False(tikverr.IsErrorUndetermined(err), errors.WithStack(err))
 }
 
 // TestFailCommitPrimaryRPCErrorThenRegionError tests the case when commit first
@@ -1452,7 +1514,7 @@ func (s *testCommitterSuite) TestFailCommitPrimaryRPCErrorThenRegionError() {
 	s.Nil(err)
 	err = t1.Commit(context.Background())
 	s.NotNil(err)
-	s.True(terror.ErrorEqual(err, terror.ErrResultUndetermined), errors.ErrorStack(err))
+	s.True(tikverr.IsErrorUndetermined(err), errors.WithStack(err))
 }
 
 // TestFailCommitPrimaryKeyError tests KeyError is handled properly when
@@ -1469,7 +1531,7 @@ func (s *testCommitterSuite) TestFailCommitPrimaryKeyError() {
 	s.Nil(err)
 	err = t3.Commit(context.Background())
 	s.NotNil(err)
-	s.True(terror.ErrorNotEqual(err, terror.ErrResultUndetermined))
+	s.False(tikverr.IsErrorUndetermined(err))
 }
 
 // TestFailCommitPrimaryRPCErrorThenKeyError tests KeyError overwrites the undeterminedErr.
@@ -1485,7 +1547,7 @@ func (s *testCommitterSuite) TestFailCommitPrimaryRPCErrorThenKeyError() {
 	s.Nil(err)
 	err = t3.Commit(context.Background())
 	s.NotNil(err)
-	s.False(terror.ErrorEqual(err, terror.ErrResultUndetermined))
+	s.False(tikverr.IsErrorUndetermined(err))
 }
 
 func (s *testCommitterSuite) TestFailCommitTimeout() {
@@ -1532,4 +1594,105 @@ func (s *testCommitterSuite) TestCommitMultipleRegions() {
 		m[k] = v
 	}
 	s.mustCommit(m)
+}
+
+func (s *testCommitterSuite) TestNewlyInsertedMemDBFlag() {
+	ctx := context.Background()
+	txn := s.begin()
+	memdb := txn.GetMemBuffer()
+	k0 := []byte("k0")
+	v0 := []byte("v0")
+	k1 := []byte("k1")
+	k2 := []byte("k2")
+	v1 := []byte("v1")
+	v2 := []byte("v2")
+
+	// Insert after delete, the newly inserted flag should not exist.
+	err := txn.Delete(k0)
+	s.Nil(err)
+	err = txn.Set(k0, v0)
+	s.Nil(err)
+	flags, err := memdb.GetFlags(k0)
+	s.Nil(err)
+	s.False(flags.HasNewlyInserted())
+
+	// Lock then insert, the newly inserted flag should exist.
+	lockCtx := &kv.LockCtx{ForUpdateTS: txn.StartTS(), WaitStartTime: time.Now()}
+	err = txn.LockKeys(context.Background(), lockCtx, k1)
+	s.Nil(err)
+	err = txn.GetMemBuffer().SetWithFlags(k1, v1, kv.SetNewlyInserted)
+	s.Nil(err)
+	flags, err = memdb.GetFlags(k1)
+	s.Nil(err)
+	s.True(flags.HasNewlyInserted())
+
+	// Lock then delete and insert, the newly inserted flag should not exist.
+	err = txn.LockKeys(ctx, lockCtx, k2)
+	s.Nil(err)
+	err = txn.Delete(k2)
+	s.Nil(err)
+	flags, err = memdb.GetFlags(k2)
+	s.Nil(err)
+	s.False(flags.HasNewlyInserted())
+	err = txn.Set(k2, v2)
+	s.Nil(err)
+	flags, err = memdb.GetFlags(k2)
+	s.Nil(err)
+	s.False(flags.HasNewlyInserted())
+
+	err = txn.Commit(ctx)
+	s.Nil(err)
+}
+
+func (s *testCommitterSuite) TestFlagsInMemBufferMutations() {
+	// Get a MemDB object from a transaction object.
+	db := s.begin().GetMemBuffer()
+
+	// A helper for iterating all cases.
+	forEachCase := func(f func(op kvrpcpb.Op, key []byte, value []byte, index int, isPessimisticLock, assertExist, assertNotExist bool)) {
+		keyIndex := 0
+		for _, op := range []kvrpcpb.Op{kvrpcpb.Op_Put, kvrpcpb.Op_Del, kvrpcpb.Op_CheckNotExists} {
+			for flags := 0; flags < (1 << 3); flags++ {
+				key := []byte(fmt.Sprintf("k%05d", keyIndex))
+				value := []byte(fmt.Sprintf("v%05d", keyIndex))
+
+				// `flag` Iterates all combinations of flags in binary.
+				isPessimisticLock := (flags & 0x4) != 0
+				assertExist := (flags & 0x2) != 0
+				assertNotExist := (flags & 0x1) != 0
+
+				f(op, key, value, keyIndex, isPessimisticLock, assertExist, assertNotExist)
+				keyIndex++
+			}
+		}
+	}
+
+	// Put some keys to the MemDB
+	forEachCase(func(op kvrpcpb.Op, key []byte, value []byte, i int, isPessimisticLock, assertExist, assertNotExist bool) {
+		if op == kvrpcpb.Op_Put {
+			err := db.Set(key, value)
+			s.Nil(err)
+		} else if op == kvrpcpb.Op_Del {
+			err := db.Delete(key)
+			s.Nil(err)
+		} else {
+			db.UpdateFlags(key, kv.SetPresumeKeyNotExists)
+		}
+	})
+
+	// Create memBufferMutations object and add keys with flags to it.
+	mutations := transaction.NewMemBufferMutationsProbe(db.Len(), db)
+
+	forEachCase(func(op kvrpcpb.Op, key []byte, value []byte, i int, isPessimisticLock, assertExist, assertNotExist bool) {
+		handle := db.IterWithFlags(key, nil).Handle()
+		mutations.Push(op, isPessimisticLock, assertExist, assertNotExist, handle)
+	})
+
+	forEachCase(func(op kvrpcpb.Op, key []byte, value []byte, i int, isPessimisticLock, assertExist, assertNotExist bool) {
+		s.Equal(key, mutations.GetKey(i))
+		s.Equal(op, mutations.GetOp(i))
+		s.Equal(isPessimisticLock, mutations.IsPessimisticLock(i))
+		s.Equal(assertExist, mutations.IsAssertExists(i))
+		s.Equal(assertNotExist, mutations.IsAssertNotExist(i))
+	})
 }

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -46,10 +48,10 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/google/btree"
 	"github.com/opentracing/opentracing-go"
-	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/parser/terror"
+	"github.com/pkg/errors"
 	"github.com/tikv/client-go/v2/config"
+	tikverr "github.com/tikv/client-go/v2/error"
 	"github.com/tikv/client-go/v2/internal/client"
 	"github.com/tikv/client-go/v2/internal/logutil"
 	"github.com/tikv/client-go/v2/internal/retry"
@@ -124,12 +126,19 @@ type AccessIndex int
 // regionStore represents region stores info
 // it will be store as unsafe.Pointer and be load at once
 type regionStore struct {
-	workTiKVIdx    AccessIndex          // point to current work peer in meta.Peers and work store in stores(same idx) for tikv peer
-	proxyTiKVIdx   AccessIndex          // point to the tikv peer that can forward requests to the leader. -1 means not using proxy
-	workTiFlashIdx int32                // point to current work peer in meta.Peers and work store in stores(same idx) for tiflash peer
-	stores         []*Store             // stores in this region
-	storeEpochs    []uint32             // snapshots of store's epoch, need reload when `storeEpochs[curr] != stores[cur].fail`
-	accessIndex    [numAccessMode][]int // AccessMode => idx in stores
+	// corresponding stores(in the same order) of Region.meta.Peers in this region.
+	stores []*Store
+	// snapshots of store's epoch, need reload when `storeEpochs[curr] != stores[cur].fail`
+	storeEpochs []uint32
+	// A region can consist of stores with different type(TiKV and TiFlash). It maintains AccessMode => idx in stores,
+	// e.g., stores[accessIndex[tiKVOnly][workTiKVIdx]] is the current working TiKV.
+	accessIndex [numAccessMode][]int
+	// accessIndex[tiKVOnly][workTiKVIdx] is the index of the current working TiKV in stores.
+	workTiKVIdx AccessIndex
+	// accessIndex[tiKVOnly][proxyTiKVIdx] is the index of TiKV that can forward requests to the leader in stores, -1 means not using proxy.
+	proxyTiKVIdx AccessIndex
+	// accessIndex[tiFlashOnly][workTiFlashIdx] is the index of the current working TiFlash in stores.
+	workTiFlashIdx int32
 }
 
 func (r *regionStore) accessStore(mode accessMode, idx AccessIndex) (int, *Store) {
@@ -153,6 +162,7 @@ func (r *regionStore) accessStoreNum(mode accessMode) int {
 // clone clones region store struct.
 func (r *regionStore) clone() *regionStore {
 	storeEpochs := make([]uint32, len(r.stores))
+	copy(storeEpochs, r.storeEpochs)
 	rs := &regionStore{
 		workTiFlashIdx: r.workTiFlashIdx,
 		proxyTiKVIdx:   r.proxyTiKVIdx,
@@ -160,7 +170,6 @@ func (r *regionStore) clone() *regionStore {
 		stores:         r.stores,
 		storeEpochs:    storeEpochs,
 	}
-	copy(storeEpochs, r.storeEpochs)
 	for i := 0; i < int(numAccessMode); i++ {
 		rs.accessIndex[i] = make([]int, len(r.accessIndex[i]))
 		copy(rs.accessIndex[i], r.accessIndex[i])
@@ -216,9 +225,9 @@ func (r *regionStore) filterStoreCandidate(aidx AccessIndex, op *storeSelectorOp
 	return s.IsLabelsMatch(op.labels)
 }
 
-// init initializes region after constructed.
-func (r *Region) init(bo *retry.Backoffer, c *RegionCache) error {
-	// region store pull used store from global store map
+func newRegion(bo *retry.Backoffer, c *RegionCache, pdRegion *pd.Region) (*Region, error) {
+	r := &Region{meta: pdRegion.Meta}
+	// regionStore pull used store from global store map
 	// to avoid acquire storeMu in later access.
 	rs := &regionStore{
 		workTiKVIdx:    0,
@@ -227,6 +236,9 @@ func (r *Region) init(bo *retry.Backoffer, c *RegionCache) error {
 		stores:         make([]*Store, 0, len(r.meta.Peers)),
 		storeEpochs:    make([]uint32, 0, len(r.meta.Peers)),
 	}
+
+	leader := pdRegion.Leader
+	var leaderAccessIdx AccessIndex
 	availablePeers := r.meta.GetPeers()[:0]
 	for _, p := range r.meta.Peers {
 		c.storeMu.RLock()
@@ -237,11 +249,14 @@ func (r *Region) init(bo *retry.Backoffer, c *RegionCache) error {
 		}
 		addr, err := store.initResolve(bo, c)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// Filter the peer on a tombstone store.
 		if addr == "" {
 			continue
+		}
+		if isSamePeer(p, leader) {
+			leaderAccessIdx = AccessIndex(len(rs.accessIndex[tiKVOnly]))
 		}
 		availablePeers = append(availablePeers, p)
 		switch store.storeType {
@@ -256,15 +271,16 @@ func (r *Region) init(bo *retry.Backoffer, c *RegionCache) error {
 	// TODO(youjiali1995): It's possible the region info in PD is stale for now but it can recover.
 	// Maybe we need backoff here.
 	if len(availablePeers) == 0 {
-		return errors.Errorf("no available peers, region: {%v}", r.meta)
+		return nil, errors.Errorf("no available peers, region: {%v}", r.meta)
 	}
+	rs.workTiKVIdx = leaderAccessIdx
 	r.meta.Peers = availablePeers
 
 	atomic.StorePointer(&r.store, unsafe.Pointer(rs))
 
 	// mark region has been init accessed.
 	r.lastAccess = time.Now().Unix()
-	return nil
+	return r, nil
 }
 
 func (r *Region) getStore() (store *regionStore) {
@@ -327,6 +343,8 @@ func (r *Region) isValid() bool {
 }
 
 // RegionCache caches Regions loaded from PD.
+// All public methods of this struct should be thread-safe, unless explicitly pointed out or the method is for testing
+// purposes only.
 type RegionCache struct {
 	pdClient         pd.Client
 	enableForwarding bool
@@ -433,7 +451,7 @@ func (c *RegionCache) checkAndResolve(needCheckStores []*Store, needCheck func(*
 
 	for _, store := range needCheckStores {
 		_, err := store.reResolve(c)
-		terror.Log(err)
+		tikverr.Log(err)
 	}
 }
 
@@ -456,19 +474,16 @@ func (c *RegionCache) SetPDClient(client pd.Client) {
 
 // RPCContext contains data that is needed to send RPC to a region.
 type RPCContext struct {
-	Region         RegionVerID
-	Meta           *metapb.Region
-	Peer           *metapb.Peer
-	AccessIdx      AccessIndex
-	Store          *Store
-	Addr           string
-	AccessMode     accessMode
-	ProxyStore     *Store      // nil means proxy is not used
-	ProxyAccessIdx AccessIndex // valid when ProxyStore is not nil
-	ProxyAddr      string      // valid when ProxyStore is not nil
-	TiKVNum        int         // Number of TiKV nodes among the region's peers. Assuming non-TiKV peers are all TiFlash peers.
-
-	tryTimes int
+	Region     RegionVerID
+	Meta       *metapb.Region
+	Peer       *metapb.Peer
+	AccessIdx  AccessIndex
+	Store      *Store
+	Addr       string
+	AccessMode accessMode
+	ProxyStore *Store // nil means proxy is not used
+	ProxyAddr  string // valid when ProxyStore is not nil
+	TiKVNum    int    // Number of TiKV nodes among the region's peers. Assuming non-TiKV peers are all TiFlash peers.
 }
 
 func (c *RPCContext) String() string {
@@ -479,7 +494,7 @@ func (c *RPCContext) String() string {
 	res := fmt.Sprintf("region ID: %d, meta: %s, peer: %s, addr: %s, idx: %d, reqStoreType: %s, runStoreType: %s",
 		c.Region.GetID(), c.Meta, c.Peer, c.Addr, c.AccessIdx, c.AccessMode, runStoreType)
 	if c.ProxyStore != nil {
-		res += fmt.Sprintf(", proxy store id: %d, proxy addr: %s, proxy idx: %d", c.ProxyStore.storeID, c.ProxyAddr, c.ProxyAccessIdx)
+		res += fmt.Sprintf(", proxy store id: %d, proxy addr: %s", c.ProxyStore.storeID, c.ProxyStore.addr)
 	}
 	return res
 }
@@ -571,15 +586,14 @@ func (c *RegionCache) GetTiKVRPCContext(bo *retry.Backoffer, id RegionVerID, rep
 	}
 
 	var (
-		proxyStore     *Store
-		proxyAddr      string
-		proxyAccessIdx AccessIndex
+		proxyStore *Store
+		proxyAddr  string
 	)
 	if c.enableForwarding && isLeaderReq {
-		if atomic.LoadInt32(&store.needForwarding) == 0 {
+		if atomic.LoadInt32(&store.unreachable) == 0 {
 			regionStore.unsetProxyStoreIfNeeded(cachedRegion)
 		} else {
-			proxyStore, proxyAccessIdx, _ = c.getProxyStore(cachedRegion, store, regionStore, accessIdx)
+			proxyStore, _, _ = c.getProxyStore(cachedRegion, store, regionStore, accessIdx)
 			if proxyStore != nil {
 				proxyAddr, err = c.getStoreAddr(bo, cachedRegion, proxyStore)
 				if err != nil {
@@ -590,17 +604,16 @@ func (c *RegionCache) GetTiKVRPCContext(bo *retry.Backoffer, id RegionVerID, rep
 	}
 
 	return &RPCContext{
-		Region:         id,
-		Meta:           cachedRegion.meta,
-		Peer:           peer,
-		AccessIdx:      accessIdx,
-		Store:          store,
-		Addr:           addr,
-		AccessMode:     tiKVOnly,
-		ProxyStore:     proxyStore,
-		ProxyAccessIdx: proxyAccessIdx,
-		ProxyAddr:      proxyAddr,
-		TiKVNum:        regionStore.accessStoreNum(tiKVOnly),
+		Region:     id,
+		Meta:       cachedRegion.meta,
+		Peer:       peer,
+		AccessIdx:  accessIdx,
+		Store:      store,
+		Addr:       addr,
+		AccessMode: tiKVOnly,
+		ProxyStore: proxyStore,
+		ProxyAddr:  proxyAddr,
+		TiKVNum:    regionStore.accessStoreNum(tiKVOnly),
 	}, nil
 }
 
@@ -674,7 +687,7 @@ func (c *RegionCache) GetTiFlashRPCContext(bo *retry.Backoffer, id RegionVerID, 
 		}
 		if store.getResolveState() == needCheck {
 			_, err := store.reResolve(c)
-			terror.Log(err)
+			tikverr.Log(err)
 		}
 		atomic.StoreInt32(&regionStore.workTiFlashIdx, int32(accessIdx))
 		peer := cachedRegion.meta.Peers[storeIdx]
@@ -768,7 +781,7 @@ func (c *RegionCache) findRegionByKey(bo *retry.Backoffer, key []byte, isEndKey 
 		if err != nil {
 			// ignore error and use old region info.
 			logutil.Logger(bo.GetCtx()).Error("load region failure",
-				zap.ByteString("key", key), zap.Error(err))
+				zap.String("key", util.HexRegionKeyStr(key)), zap.Error(err))
 		} else {
 			logutil.Eventf(bo.GetCtx(), "load region %d from pd, due to need-reload", lr.GetID())
 			r = lr
@@ -781,8 +794,7 @@ func (c *RegionCache) findRegionByKey(bo *retry.Backoffer, key []byte, isEndKey 
 }
 
 // OnSendFailForTiFlash handles send request fail logic for tiflash.
-func (c *RegionCache) OnSendFailForTiFlash(bo *retry.Backoffer, store *Store, region RegionVerID, prev *metapb.Region, scheduleReload bool, err error) {
-
+func (c *RegionCache) OnSendFailForTiFlash(bo *retry.Backoffer, store *Store, region RegionVerID, prev *metapb.Region, scheduleReload bool, err error, skipSwitchPeerLog bool) {
 	r := c.GetCachedRegionWithRLock(region)
 	if r == nil {
 		return
@@ -813,10 +825,15 @@ func (c *RegionCache) OnSendFailForTiFlash(bo *retry.Backoffer, store *Store, re
 
 	// try next peer
 	rs.switchNextFlashPeer(r, accessIdx)
-	logutil.Logger(bo.GetCtx()).Info("switch region tiflash peer to next due to send request fail",
-		zap.Stringer("region", &region),
-		zap.Bool("needReload", scheduleReload),
-		zap.Error(err))
+	// In most scenarios, TiFlash will batch all the regions in one TiFlash store into one request, so when meet send failure,
+	// this function is called repeatedly for all the regions, since one TiFlash store might contain thousands of regions, we
+	// need a way to avoid generating too much useless log
+	if !skipSwitchPeerLog {
+		logutil.Logger(bo.GetCtx()).Info("switch region tiflash peer to next due to send request fail",
+			zap.Stringer("region", &region),
+			zap.Bool("needReload", scheduleReload),
+			zap.Error(err))
+	}
 
 	// force reload region when retry all known peers in region.
 	if scheduleReload {
@@ -857,53 +874,21 @@ func (c *RegionCache) OnSendFail(bo *retry.Backoffer, ctx *RPCContext, scheduleR
 	}
 
 	rs := r.getStore()
-	startForwarding := false
-	incEpochStoreIdx := -1
 
 	if err != nil {
 		storeIdx, s := rs.accessStore(ctx.AccessMode, ctx.AccessIdx)
-		leaderReq := ctx.Store.storeType == tikvrpc.TiKV && rs.workTiKVIdx == ctx.AccessIdx
 
-		//  Mark the store as failure if it's not a redirection request because we
-		//  can't know the status of the proxy store by it.
-		if ctx.ProxyStore == nil {
-			// send fail but store is reachable, keep retry current peer for replica leader request.
-			// but we still need switch peer for follower-read or learner-read(i.e. tiflash)
-			if leaderReq {
-				if s.requestLiveness(bo, c) == reachable {
-					return
-				} else if c.enableForwarding {
-					s.startHealthCheckLoopIfNeeded(c)
-					startForwarding = true
-				}
-			}
-
-			// invalidate regions in store.
-			incEpochStoreIdx = c.markRegionNeedBeRefill(s, storeIdx, rs)
-		}
+		// invalidate regions in store.
+		c.markRegionNeedBeRefill(s, storeIdx, rs)
 	}
 
 	// try next peer to found new leader.
 	if ctx.AccessMode == tiKVOnly {
-		if startForwarding || ctx.ProxyStore != nil {
-			var currentProxyIdx AccessIndex = -1
-			if ctx.ProxyStore != nil {
-				currentProxyIdx = ctx.ProxyAccessIdx
-			}
-			// In case the epoch of the store is increased, try to avoid reloading the current region by also
-			// increasing the epoch stored in `rs`.
-			rs.switchNextProxyStore(r, currentProxyIdx, incEpochStoreIdx)
-			logutil.Logger(bo.GetCtx()).Info("switch region proxy peer to next due to send request fail",
-				zap.Stringer("current", ctx),
-				zap.Bool("needReload", scheduleReload),
-				zap.Error(err))
-		} else {
-			rs.switchNextTiKVPeer(r, ctx.AccessIdx)
-			logutil.Logger(bo.GetCtx()).Info("switch region peer to next due to send request fail",
-				zap.Stringer("current", ctx),
-				zap.Bool("needReload", scheduleReload),
-				zap.Error(err))
-		}
+		rs.switchNextTiKVPeer(r, ctx.AccessIdx)
+		logutil.Logger(bo.GetCtx()).Info("switch region peer to next due to send request fail",
+			zap.Stringer("current", ctx),
+			zap.Bool("needReload", scheduleReload),
+			zap.Error(err))
 	} else {
 		rs.switchNextFlashPeer(r, ctx.AccessIdx)
 		logutil.Logger(bo.GetCtx()).Info("switch region tiflash peer to next due to send request fail",
@@ -948,7 +933,7 @@ func (c *RegionCache) LocateRegionByID(bo *retry.Backoffer, regionID uint64) (*K
 
 	r, err := c.loadRegionByID(bo, regionID)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	c.mu.Lock()
@@ -974,7 +959,7 @@ func (c *RegionCache) GroupKeysByRegion(bo *retry.Backoffer, keys [][]byte, filt
 			var err error
 			lastLoc, err = c.LocateKey(bo, k)
 			if err != nil {
-				return nil, first, errors.Trace(err)
+				return nil, first, err
 			}
 			if filter != nil && filter(k, lastLoc.StartKey) {
 				continue
@@ -994,7 +979,7 @@ func (c *RegionCache) ListRegionIDsInKeyRange(bo *retry.Backoffer, startKey, end
 	for {
 		curRegion, err := c.LocateKey(bo, startKey)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, err
 		}
 		regionIDs = append(regionIDs, curRegion.Region.id)
 		if curRegion.Contains(endKey) {
@@ -1011,7 +996,7 @@ func (c *RegionCache) LoadRegionsInKeyRange(bo *retry.Backoffer, startKey, endKe
 	for {
 		batchRegions, err = c.BatchLoadRegionsWithKeyRange(bo, startKey, endKey, defaultRegionsPerBatch)
 		if err != nil {
-			return nil, errors.Trace(err)
+			return nil, err
 		}
 		if len(batchRegions) == 0 {
 			// should never happen
@@ -1055,7 +1040,7 @@ func (c *RegionCache) BatchLoadRegionsWithKeyRange(bo *retry.Backoffer, startKey
 func (c *RegionCache) BatchLoadRegionsFromKey(bo *retry.Backoffer, startKey []byte, count int) ([]byte, error) {
 	regions, err := c.BatchLoadRegionsWithKeyRange(bo, startKey, nil, count)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 	return regions[len(regions)-1].EndKey(), nil
 }
@@ -1092,7 +1077,7 @@ func (c *RegionCache) UpdateLeader(regionID RegionVerID, leader *metapb.Peer, cu
 		return
 	}
 
-	if !c.switchWorkLeaderToPeer(r, leader) {
+	if !r.switchWorkLeaderToPeer(leader) {
 		logutil.BgLogger().Info("invalidate region cache due to cannot find peer when updating leader",
 			zap.Uint64("regionID", regionID.GetID()),
 			zap.Int("currIdx", int(currentPeerIdx)),
@@ -1268,7 +1253,7 @@ func (c *RegionCache) loadRegion(bo *retry.Backoffer, key []byte, isEndKey bool)
 		if backoffErr != nil {
 			err := bo.Backoff(retry.BoPDRPC, backoffErr)
 			if err != nil {
-				return nil, errors.Trace(err)
+				return nil, errors.WithStack(err)
 			}
 		}
 		var reg *pd.Region
@@ -1284,11 +1269,14 @@ func (c *RegionCache) loadRegion(bo *retry.Backoffer, key []byte, isEndKey bool)
 			metrics.RegionCacheCounterWithGetRegionOK.Inc()
 		}
 		if err != nil {
-			backoffErr = errors.Errorf("loadRegion from PD failed, key: %q, err: %v", key, err)
+			if isDecodeError(err) {
+				return nil, errors.Errorf("failed to decode region range key, key: %q, err: %v", util.HexRegionKeyStr(key), err)
+			}
+			backoffErr = errors.Errorf("loadRegion from PD failed, key: %q, err: %v", util.HexRegionKeyStr(key), err)
 			continue
 		}
 		if reg == nil || reg.Meta == nil {
-			backoffErr = errors.Errorf("region not found for key %q", key)
+			backoffErr = errors.Errorf("region not found for key %q", util.HexRegionKeyStr(key))
 			continue
 		}
 		filterUnavailablePeers(reg)
@@ -1299,15 +1287,7 @@ func (c *RegionCache) loadRegion(bo *retry.Backoffer, key []byte, isEndKey bool)
 			searchPrev = true
 			continue
 		}
-		region := &Region{meta: reg.Meta}
-		err = region.init(bo, c)
-		if err != nil {
-			return nil, err
-		}
-		if reg.Leader != nil {
-			c.switchWorkLeaderToPeer(region, reg.Leader)
-		}
-		return region, nil
+		return newRegion(bo, c, reg)
 	}
 }
 
@@ -1324,7 +1304,7 @@ func (c *RegionCache) loadRegionByID(bo *retry.Backoffer, regionID uint64) (*Reg
 		if backoffErr != nil {
 			err := bo.Backoff(retry.BoPDRPC, backoffErr)
 			if err != nil {
-				return nil, errors.Trace(err)
+				return nil, errors.WithStack(err)
 			}
 		}
 		reg, err := c.pdClient.GetRegionByID(ctx, regionID)
@@ -1334,6 +1314,9 @@ func (c *RegionCache) loadRegionByID(bo *retry.Backoffer, regionID uint64) (*Reg
 			metrics.RegionCacheCounterWithGetRegionByIDOK.Inc()
 		}
 		if err != nil {
+			if isDecodeError(err) {
+				return nil, errors.Errorf("failed to decode region range key, regionID: %q, err: %v", regionID, err)
+			}
 			backoffErr = errors.Errorf("loadRegion from PD failed, regionID: %v, err: %v", regionID, err)
 			continue
 		}
@@ -1344,15 +1327,7 @@ func (c *RegionCache) loadRegionByID(bo *retry.Backoffer, regionID uint64) (*Reg
 		if len(reg.Meta.Peers) == 0 {
 			return nil, errors.New("receive Region with no available peer")
 		}
-		region := &Region{meta: reg.Meta}
-		err = region.init(bo, c)
-		if err != nil {
-			return nil, err
-		}
-		if reg.Leader != nil {
-			c.switchWorkLeaderToPeer(region, reg.Leader)
-		}
-		return region, nil
+		return newRegion(bo, c, reg)
 	}
 }
 
@@ -1374,11 +1349,14 @@ func (c *RegionCache) scanRegions(bo *retry.Backoffer, startKey, endKey []byte, 
 		if backoffErr != nil {
 			err := bo.Backoff(retry.BoPDRPC, backoffErr)
 			if err != nil {
-				return nil, errors.Trace(err)
+				return nil, errors.WithStack(err)
 			}
 		}
 		regionsInfo, err := c.pdClient.ScanRegions(ctx, startKey, endKey, limit)
 		if err != nil {
+			if isDecodeError(err) {
+				return nil, errors.Errorf("failed to decode region range key, startKey: %q, limit: %q, err: %v", util.HexRegionKeyStr(startKey), limit, err)
+			}
 			metrics.RegionCacheCounterWithScanRegionsError.Inc()
 			backoffErr = errors.Errorf(
 				"scanRegion from PD failed, startKey: %q, limit: %q, err: %v",
@@ -1395,17 +1373,15 @@ func (c *RegionCache) scanRegions(bo *retry.Backoffer, startKey, endKey []byte, 
 		}
 		regions := make([]*Region, 0, len(regionsInfo))
 		for _, r := range regionsInfo {
-			region := &Region{meta: r.Meta}
-			err := region.init(bo, c)
+			// Leader id = 0 indicates no leader.
+			if r.Leader == nil || r.Leader.GetId() == 0 {
+				continue
+			}
+			region, err := newRegion(bo, c, r)
 			if err != nil {
 				return nil, err
 			}
-			leader := r.Leader
-			// Leader id = 0 indicates no leader.
-			if leader != nil && leader.GetId() != 0 {
-				c.switchWorkLeaderToPeer(region, leader)
-				regions = append(regions, region)
-			}
+			regions = append(regions, region)
 		}
 		if len(regions) == 0 {
 			return nil, errors.New("receive Regions with no peer")
@@ -1446,7 +1422,7 @@ func (c *RegionCache) getStoreAddr(bo *retry.Backoffer, region *Region, store *S
 }
 
 func (c *RegionCache) getProxyStore(region *Region, store *Store, rs *regionStore, workStoreIdx AccessIndex) (proxyStore *Store, proxyAccessIdx AccessIndex, proxyStoreIdx int) {
-	if !c.enableForwarding || store.storeType != tikvrpc.TiKV || atomic.LoadInt32(&store.needForwarding) == 0 {
+	if !c.enableForwarding || store.storeType != tikvrpc.TiKV || atomic.LoadInt32(&store.unreachable) == 0 {
 		return
 	}
 
@@ -1476,7 +1452,7 @@ func (c *RegionCache) getProxyStore(region *Region, store *Store, rs *regionStor
 		}
 		storeIdx, store := rs.accessStore(tiKVOnly, AccessIndex(index))
 		// Skip unreachable stores.
-		if atomic.LoadInt32(&store.needForwarding) != 0 {
+		if atomic.LoadInt32(&store.unreachable) != 0 {
 			continue
 		}
 
@@ -1567,8 +1543,7 @@ func (c *RegionCache) OnRegionEpochNotMatch(bo *retry.Backoffer, ctx *RPCContext
 				return false, errors.Errorf("newRegion's range key is not encoded: %v, %v", meta, err)
 			}
 		}
-		region := &Region{meta: meta}
-		err := region.init(bo, c)
+		region, err := newRegion(bo, c, &pd.Region{Meta: meta})
 		if err != nil {
 			return false, err
 		}
@@ -1578,7 +1553,7 @@ func (c *RegionCache) OnRegionEpochNotMatch(bo *retry.Backoffer, ctx *RPCContext
 		} else {
 			initLeaderStoreID = ctx.Store.storeID
 		}
-		c.switchWorkLeaderToPeer(region, region.getPeerOnStore(initLeaderStoreID))
+		region.switchWorkLeaderToPeer(region.getPeerOnStore(initLeaderStoreID))
 		newRegions = append(newRegions, region)
 		if ctx.Region == region.VerID() {
 			needInvalidateOld = false
@@ -1747,10 +1722,24 @@ func (r *Region) EndKey() []byte {
 	return r.meta.EndKey
 }
 
+func (r *Region) getPeerStoreIndex(peer *metapb.Peer) (idx int, found bool) {
+	if len(r.meta.Peers) == 0 || peer == nil {
+		return
+	}
+	for i, p := range r.meta.Peers {
+		if isSamePeer(p, peer) {
+			idx = i
+			found = true
+			return
+		}
+	}
+	return
+}
+
 // switchWorkLeaderToPeer switches current store to the one on specific store. It returns
 // false if no peer matches the peer.
-func (c *RegionCache) switchWorkLeaderToPeer(r *Region, peer *metapb.Peer) (found bool) {
-	globalStoreIdx, found := c.getPeerStoreIndex(r, peer)
+func (r *Region) switchWorkLeaderToPeer(peer *metapb.Peer) (found bool) {
+	globalStoreIdx, found := r.getPeerStoreIndex(peer)
 	if !found {
 		return
 	}
@@ -1788,41 +1777,6 @@ func (r *regionStore) switchNextTiKVPeer(rr *Region, currentPeerIdx AccessIndex)
 	nextIdx := (currentPeerIdx + 1) % AccessIndex(r.accessStoreNum(tiKVOnly))
 	newRegionStore := r.clone()
 	newRegionStore.workTiKVIdx = nextIdx
-	rr.compareAndSwapStore(r, newRegionStore)
-}
-
-// switchNextProxyStore switches the index of the peer that will forward requests to the leader to the next peer.
-// If proxy is currently not used on this region, the value of `currentProxyIdx` should be -1, and a random peer will
-// be select in this case.
-func (r *regionStore) switchNextProxyStore(rr *Region, currentProxyIdx AccessIndex, incEpochStoreIdx int) {
-	if r.proxyTiKVIdx != currentProxyIdx {
-		return
-	}
-
-	tikvNum := r.accessStoreNum(tiKVOnly)
-	var nextIdx AccessIndex
-
-	// If the region is not using proxy before, randomly select a non-leader peer for the first try.
-	if currentProxyIdx == -1 {
-		// Randomly select an non-leader peer
-		// TODO: Skip unreachable peers here.
-		nextIdx = AccessIndex(rand.Intn(tikvNum - 1))
-		if nextIdx >= r.workTiKVIdx {
-			nextIdx++
-		}
-	} else {
-		nextIdx = (currentProxyIdx + 1) % AccessIndex(tikvNum)
-		// skips the current workTiKVIdx
-		if nextIdx == r.workTiKVIdx {
-			nextIdx = (nextIdx + 1) % AccessIndex(tikvNum)
-		}
-	}
-
-	newRegionStore := r.clone()
-	newRegionStore.proxyTiKVIdx = nextIdx
-	if incEpochStoreIdx >= 0 {
-		newRegionStore.storeEpochs[incEpochStoreIdx]++
-	}
 	rr.compareAndSwapStore(r, newRegionStore)
 }
 
@@ -1865,20 +1819,6 @@ func (r *Region) getPeerOnStore(storeID uint64) *metapb.Peer {
 	return nil
 }
 
-func (c *RegionCache) getPeerStoreIndex(r *Region, peer *metapb.Peer) (idx int, found bool) {
-	if len(r.meta.Peers) == 0 || peer == nil {
-		return
-	}
-	for i, p := range r.meta.Peers {
-		if isSamePeer(p, peer) {
-			idx = i
-			found = true
-			return
-		}
-	}
-	return
-}
-
 // Contains checks whether the key is in the region, for the maximum region endKey is empty.
 // startKey <= key < endKey.
 func (r *Region) Contains(key []byte) bool {
@@ -1906,10 +1846,11 @@ type Store struct {
 	storeType    tikvrpc.EndpointType // type of the store
 	tokenCount   atomic2.Int64        // used store token count
 
-	// whether the store is disconnected due to some reason, therefore requests to the store needs to be
+	// whether the store is unreachable due to some reason, therefore requests to the store needs to be
 	// forwarded by other stores. this is also the flag that a checkUntilHealth goroutine is running for this store.
 	// this mechanism is currently only applicable for TiKV stores.
-	needForwarding int32
+	unreachable      int32
+	unreachableSince time.Time
 }
 
 type resolveState uint64
@@ -1960,8 +1901,8 @@ func (s *Store) initResolve(bo *retry.Backoffer, c *RegionCache) (addr string, e
 		} else {
 			metrics.RegionCacheCounterWithGetStoreOK.Inc()
 		}
-		if bo.GetCtx().Err() != nil && errors.Cause(bo.GetCtx().Err()) == context.Canceled {
-			return
+		if err := bo.GetCtx().Err(); err != nil && errors.Cause(err) == context.Canceled {
+			return "", errors.WithStack(err)
 		}
 		if err != nil && !isStoreNotFoundError(err) {
 			// TODO: more refine PD error status handle.
@@ -2139,13 +2080,14 @@ func (s *Store) startHealthCheckLoopIfNeeded(c *RegionCache) {
 	}
 
 	// It may be already started by another thread.
-	if atomic.CompareAndSwapInt32(&s.needForwarding, 0, 1) {
+	if atomic.CompareAndSwapInt32(&s.unreachable, 0, 1) {
+		s.unreachableSince = time.Now()
 		go s.checkUntilHealth(c)
 	}
 }
 
 func (s *Store) checkUntilHealth(c *RegionCache) {
-	defer atomic.CompareAndSwapInt32(&s.needForwarding, 1, 0)
+	defer atomic.CompareAndSwapInt32(&s.unreachable, 1, 0)
 
 	ticker := time.NewTicker(time.Second)
 	lastCheckPDTime := time.Now()
@@ -2278,11 +2220,11 @@ func createKVHealthClient(ctx context.Context, addr string) (*grpc.ClientConn, h
 
 	cfg := config.GetGlobalConfig()
 
-	opt := grpc.WithInsecure()
+	opt := grpc.WithInsecure() //nolint
 	if len(cfg.Security.ClusterSSLCA) != 0 {
 		tlsConfig, err := cfg.Security.ToTLSConfig()
 		if err != nil {
-			return nil, nil, errors.Trace(err)
+			return nil, nil, errors.WithStack(err)
 		}
 		opt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 	}
@@ -2310,7 +2252,7 @@ func createKVHealthClient(ctx context.Context, addr string) (*grpc.ClientConn, h
 		}),
 	)
 	if err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, nil, errors.WithStack(err)
 	}
 	cli := healthpb.NewHealthClient(conn)
 	return conn, cli, nil
