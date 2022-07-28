@@ -236,8 +236,8 @@ func (c *Client) ClusterID() uint64 {
 
 // Get queries value with the key. When the key does not exist, it returns `nil, nil`.
 func (c *Client) Get(ctx context.Context, key []byte, options ...RawOption) ([]byte, error) {
-	start := time.Now()
-	defer func() { metrics.RawkvCmdHistogramWithGet.Observe(time.Since(start).Seconds()) }()
+	// start := time.Now()
+	// defer func() { metrics.RawkvCmdHistogramWithGet.Observe(time.Since(start).Seconds()) }()
 
 	opts := c.getRawKVOptions(options...)
 	req := tikvrpc.NewRequest(
@@ -297,11 +297,19 @@ func (c *Client) BatchGet(ctx context.Context, keys [][]byte, options ...RawOpti
 }
 
 // PutWithTTL stores a key-value pair to TiKV with a time-to-live duration.
+<<<<<<< HEAD
 func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64, options ...RawOption) error {
 	start := time.Now()
 	defer func() { metrics.RawkvCmdHistogramWithBatchPut.Observe(time.Since(start).Seconds()) }()
 	metrics.RawkvSizeHistogramWithKey.Observe(float64(len(key)))
 	metrics.RawkvSizeHistogramWithValue.Observe(float64(len(value)))
+=======
+func (c *Client) PutWithTTL(ctx context.Context, key, value []byte, ttl uint64) error {
+	// start := time.Now()
+	// defer func() { metrics.RawkvCmdHistogramWithBatchPut.Observe(time.Since(start).Seconds()) }()
+	// metrics.RawkvSizeHistogramWithKey.Observe(float64(len(key)))
+	// metrics.RawkvSizeHistogramWithValue.Observe(float64(len(value)))
+>>>>>>> 4bc8b2b (Remove metrics for get and put calls)
 
 	if len(value) == 0 {
 		return errors.New("empty value is not supported")
