@@ -1023,7 +1023,7 @@ func (c *RegionCache) markRegionNeedBeRefill(s *Store, storeIdx int, rs *regionS
 	// invalidate regions in store.
 	epoch := rs.storeEpochs[storeIdx]
 	if atomic.CompareAndSwapUint32(&s.epoch, epoch, epoch+1) {
-		logutil.BgLogger().Info("mark store's regions need be refill", zap.String("store", s.addr))
+		// logutil.BgLogger().Info("mark store's regions need be refill", zap.String("store", s.addr))
 		incEpochStoreIdx = storeIdx
 		metrics.RegionCacheCounterWithInvalidateStoreRegionsOK.Inc()
 	}

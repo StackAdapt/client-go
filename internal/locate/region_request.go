@@ -791,7 +791,7 @@ func (s *replicaSelector) checkLiveness(bo *retry.Backoffer, accessReplica *repl
 func (s *replicaSelector) invalidateReplicaStore(replica *replica, cause error) {
 	store := replica.store
 	if atomic.CompareAndSwapUint32(&store.epoch, replica.epoch, replica.epoch+1) {
-		logutil.BgLogger().Info("mark store's regions need be refill", zap.Uint64("id", store.storeID), zap.String("addr", store.addr), zap.Error(cause))
+		// logutil.BgLogger().Info("mark store's regions need be refill", zap.Uint64("id", store.storeID), zap.String("addr", store.addr), zap.Error(cause))
 		metrics.RegionCacheCounterWithInvalidateStoreRegionsOK.Inc()
 		// schedule a store addr resolve.
 		store.markNeedCheck(s.regionCache.notifyCheckCh)
