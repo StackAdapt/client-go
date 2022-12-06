@@ -52,6 +52,7 @@ import (
 	"github.com/tikv/client-go/v2/internal/logutil"
 	"github.com/tikv/client-go/v2/internal/retry"
 	"github.com/tikv/client-go/v2/metrics"
+	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
 	"github.com/tikv/client-go/v2/util"
@@ -73,7 +74,8 @@ func (actionPrewrite) tiKVTxnRegionsNumHistogram() prometheus.Observer {
 func (c *twoPhaseCommitter) buildPrewriteRequest(batch batchMutations, txnSize uint64) *tikvrpc.Request {
 	m := batch.mutations
 	mutations := make([]*kvrpcpb.Mutation, m.Len())
-	isPessimisticLock := make([]bool, m.Len())
+	pessimisticActions := make([]kvrpcpb.PrewriteRequest_PessimisticAction, m.Len())
+
 	for i := 0; i < m.Len(); i++ {
 		assertion := kvrpcpb.Assertion_None
 		if m.IsAssertExists(i) {
@@ -88,7 +90,13 @@ func (c *twoPhaseCommitter) buildPrewriteRequest(batch batchMutations, txnSize u
 			Value:     m.GetValue(i),
 			Assertion: assertion,
 		}
-		isPessimisticLock[i] = m.IsPessimisticLock(i)
+		if m.IsPessimisticLock(i) {
+			pessimisticActions[i] = kvrpcpb.PrewriteRequest_DO_PESSIMISTIC_CHECK
+		} else if m.NeedConstraintCheckInPrewrite(i) {
+			pessimisticActions[i] = kvrpcpb.PrewriteRequest_DO_CONSTRAINT_CHECK
+		} else {
+			pessimisticActions[i] = kvrpcpb.PrewriteRequest_SKIP_PESSIMISTIC_CHECK
+		}
 	}
 	c.mu.Lock()
 	minCommitTS := c.minCommitTS
@@ -108,6 +116,20 @@ func (c *twoPhaseCommitter) buildPrewriteRequest(batch batchMutations, txnSize u
 
 	ttl := c.lockTTL
 
+	// ref: https://github.com/pingcap/tidb/issues/33641
+	// we make the TTL satisfy the following condition:
+	// 	max_commit_ts.physical < start_ts.physical + TTL < (current_ts of some check_txn_status that wants to resolve this lock).physical
+	// and we have:
+	//  current_ts <= max_ts <= min_commit_ts of this lock
+	// such that
+	// 	max_commit_ts < min_commit_ts, so if this lock is resolved, it will be forced to fall back to normal 2PC, thus resolving the issue.
+	if c.isAsyncCommit() && c.isPessimistic {
+		safeTTL := uint64(oracle.ExtractPhysical(c.maxCommitTS)-oracle.ExtractPhysical(c.startTS)) + 1
+		if safeTTL > ttl {
+			ttl = safeTTL
+		}
+	}
+
 	if c.sessionID > 0 {
 		if _, err := util.EvalFailpoint("twoPCShortLockTTL"); err == nil {
 			ttl = 1
@@ -126,16 +148,16 @@ func (c *twoPhaseCommitter) buildPrewriteRequest(batch batchMutations, txnSize u
 	}
 
 	req := &kvrpcpb.PrewriteRequest{
-		Mutations:         mutations,
-		PrimaryLock:       c.primary(),
-		StartVersion:      c.startTS,
-		LockTtl:           ttl,
-		IsPessimisticLock: isPessimisticLock,
-		ForUpdateTs:       c.forUpdateTS,
-		TxnSize:           txnSize,
-		MinCommitTs:       minCommitTS,
-		MaxCommitTs:       c.maxCommitTS,
-		AssertionLevel:    assertionLevel,
+		Mutations:          mutations,
+		PrimaryLock:        c.primary(),
+		StartVersion:       c.startTS,
+		LockTtl:            ttl,
+		PessimisticActions: pessimisticActions,
+		ForUpdateTs:        c.forUpdateTS,
+		TxnSize:            txnSize,
+		MinCommitTs:        minCommitTS,
+		MaxCommitTs:        c.maxCommitTS,
+		AssertionLevel:     assertionLevel,
 	}
 
 	if _, err := util.EvalFailpoint("invalidMaxCommitTS"); err == nil {
@@ -155,9 +177,15 @@ func (c *twoPhaseCommitter) buildPrewriteRequest(batch batchMutations, txnSize u
 		req.TryOnePc = true
 	}
 
-	r := tikvrpc.NewRequest(tikvrpc.CmdPrewrite, req,
-		kvrpcpb.Context{Priority: c.priority, SyncLog: c.syncLog, ResourceGroupTag: c.resourceGroupTag,
-			DiskFullOpt: c.diskFullOpt, MaxExecutionDurationMs: uint64(client.MaxWriteExecutionTime.Milliseconds())})
+	r := tikvrpc.NewRequest(tikvrpc.CmdPrewrite, req, kvrpcpb.Context{
+		Priority:               c.priority,
+		SyncLog:                c.syncLog,
+		ResourceGroupTag:       c.resourceGroupTag,
+		DiskFullOpt:            c.diskFullOpt,
+		TxnSource:              c.txnSource,
+		MaxExecutionDurationMs: uint64(client.MaxWriteExecutionTime.Milliseconds()),
+		RequestSource:          c.txn.GetRequestSource(),
+	})
 	if c.resourceGroupTag == nil && c.resourceGroupTagger != nil {
 		c.resourceGroupTagger(r)
 	}
@@ -190,6 +218,11 @@ func (action actionPrewrite) handleSingleBatch(c *twoPhaseCommitter, bo *retry.B
 				return errors.New("injected error on prewriting secondary batch")
 			}
 			util.EvalFailpoint("prewriteSecondary") // for other failures like sleep or pause
+			// concurrent failpoint sleep doesn't work as expected. So we need a separate fail point.
+			// `1*sleep()` can block multiple concurrent threads that meet the failpoint.
+			if val, err := util.EvalFailpoint("prewriteSecondarySleep"); err == nil {
+				time.Sleep(time.Millisecond * time.Duration(val.(int)))
+			}
 		}
 	}
 
@@ -205,6 +238,7 @@ func (action actionPrewrite) handleSingleBatch(c *twoPhaseCommitter, bo *retry.B
 
 	req := c.buildPrewriteRequest(batch, txnSize)
 	sender := locate.NewRegionRequestSender(c.store.GetRegionCache(), c.store.GetTiKVClient())
+	var resolvingRecordToken *int
 	defer func() {
 		if err != nil {
 			// If we fail to receive response for async commit prewrite, it will be undetermined whether this
@@ -218,7 +252,11 @@ func (action actionPrewrite) handleSingleBatch(c *twoPhaseCommitter, bo *retry.B
 	}()
 	for {
 		attempts++
-		if time.Since(tBegin) > slowRequestThreshold {
+		if attempts > 1 || action.retry {
+			req.IsRetryRequest = true
+		}
+		reqBegin := time.Now()
+		if reqBegin.Sub(tBegin) > slowRequestThreshold {
 			logutil.BgLogger().Warn("slow prewrite request", zap.Uint64("startTS", c.startTS), zap.Stringer("region", &batch.region), zap.Int("attempts", attempts))
 			tBegin = time.Now()
 		}
@@ -276,6 +314,10 @@ func (action actionPrewrite) handleSingleBatch(c *twoPhaseCommitter, bo *retry.B
 			// Clear the RPC Error since the request is evaluated successfully.
 			sender.SetRPCError(nil)
 
+			// Update CommitDetails
+			reqDuration := time.Since(reqBegin)
+			c.getDetail().MergePrewriteReqDetails(reqDuration, batch.region.GetID(), sender.GetStoreAddr(), prewriteResp.ExecDetailsV2)
+
 			if batch.isPrimary {
 				// After writing the primary key, if the size of the transaction is larger than 32M,
 				// start the ttlManager. The ttlManager will be closed in tikvTxn.Commit().
@@ -329,6 +371,7 @@ func (action actionPrewrite) handleSingleBatch(c *twoPhaseCommitter, bo *retry.B
 					c.mu.Unlock()
 				}
 			}
+
 			return nil
 		}
 		var locks []*txnlock.Lock
@@ -354,16 +397,27 @@ func (action actionPrewrite) handleSingleBatch(c *twoPhaseCommitter, bo *retry.B
 			// TiKV will return a PessimisticLockNotFound error directly if it encounters a different lock. Otherwise,
 			// TiKV returns lock.TTL = 0, and we still need to resolve the lock.
 			if lock.TxnID > c.startTS && !c.isPessimistic {
-				return tikverr.NewErrWriteConfictWithArgs(c.startTS, lock.TxnID, 0, lock.Key)
+				return tikverr.NewErrWriteConflictWithArgs(c.startTS, lock.TxnID, 0, lock.Key, kvrpcpb.WriteConflict_Optimistic)
 			}
 			locks = append(locks, lock)
 		}
-		start := time.Now()
-		msBeforeExpired, err := c.store.GetLockResolver().ResolveLocks(bo, c.startTS, locks)
+		if resolvingRecordToken == nil {
+			token := c.store.GetLockResolver().RecordResolvingLocks(locks, c.startTS)
+			resolvingRecordToken = &token
+			defer c.store.GetLockResolver().ResolveLocksDone(c.startTS, *resolvingRecordToken)
+		} else {
+			c.store.GetLockResolver().UpdateResolvingLocks(locks, c.startTS, *resolvingRecordToken)
+		}
+		resolveLockOpts := txnlock.ResolveLocksOptions{
+			CallerStartTS: c.startTS,
+			Locks:         locks,
+			Detail:        &c.getDetail().ResolveLock,
+		}
+		resolveLockRes, err := c.store.GetLockResolver().ResolveLocksWithOpts(bo, resolveLockOpts)
 		if err != nil {
 			return err
 		}
-		atomic.AddInt64(&c.getDetail().ResolveLockTime, int64(time.Since(start)))
+		msBeforeExpired := resolveLockRes.TTL
 		if msBeforeExpired > 0 {
 			err = bo.BackoffWithCfgAndMaxSleep(retry.BoTxnLock, int(msBeforeExpired), errors.Errorf("2PC prewrite lockedKeys: %d", len(locks)))
 			if err != nil {

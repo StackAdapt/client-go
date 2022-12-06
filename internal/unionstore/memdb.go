@@ -85,16 +85,17 @@ type MemDB struct {
 
 	vlogInvalid bool
 	dirty       bool
-	stages      []memdbCheckpoint
+	stages      []MemDBCheckpoint
 }
 
 func newMemDB() *MemDB {
 	db := new(MemDB)
 	db.allocator.init()
 	db.root = nullAddr
-	db.stages = make([]memdbCheckpoint, 0, 2)
+	db.stages = make([]MemDBCheckpoint, 0, 2)
 	db.entrySizeLimit = math.MaxUint64
 	db.bufferSizeLimit = math.MaxUint64
+	db.vlog.memdb = db
 	return db
 }
 
@@ -111,14 +112,15 @@ func (db *MemDB) Staging() int {
 
 // Release publish all modifications in the latest staging buffer to upper level.
 func (db *MemDB) Release(h int) {
+	db.Lock()
+	defer db.Unlock()
+
 	if h != len(db.stages) {
 		// This should never happens in production environment.
 		// Use panic to make debug easier.
 		panic("cannot release staging buffer")
 	}
 
-	db.Lock()
-	defer db.Unlock()
 	if h == 1 {
 		tail := db.vlog.checkpoint()
 		if !db.stages[0].isSamePosition(&tail) {
@@ -131,6 +133,9 @@ func (db *MemDB) Release(h int) {
 // Cleanup cleanup the resources referenced by the StagingHandle.
 // If the changes are not published by `Release`, they will be discarded.
 func (db *MemDB) Cleanup(h int) {
+	db.Lock()
+	defer db.Unlock()
+
 	if h > len(db.stages) {
 		return
 	}
@@ -140,8 +145,6 @@ func (db *MemDB) Cleanup(h int) {
 		panic("cannot cleanup staging buffer")
 	}
 
-	db.Lock()
-	defer db.Unlock()
 	cp := &db.stages[h-1]
 	if !db.vlogInvalid {
 		curr := db.vlog.checkpoint()
@@ -151,6 +154,18 @@ func (db *MemDB) Cleanup(h int) {
 		}
 	}
 	db.stages = db.stages[:h-1]
+}
+
+// Checkpoint returns a checkpoint of MemDB.
+func (db *MemDB) Checkpoint() *MemDBCheckpoint {
+	cp := db.vlog.checkpoint()
+	return &cp
+}
+
+// RevertToCheckpoint reverts the MemDB to the checkpoint.
+func (db *MemDB) RevertToCheckpoint(cp *MemDBCheckpoint) {
+	db.vlog.revertToCheckpoint(db, cp)
+	db.vlog.truncate(cp)
 }
 
 // Reset resets the MemBuffer to initial states.
@@ -294,6 +309,9 @@ func (db *MemDB) Dirty() bool {
 }
 
 func (db *MemDB) set(key []byte, value []byte, ops ...kv.FlagsOp) error {
+	db.Lock()
+	defer db.Unlock()
+
 	if db.vlogInvalid {
 		// panic for easier debugging.
 		panic("vlog is resetted")
@@ -308,21 +326,25 @@ func (db *MemDB) set(key []byte, value []byte, ops ...kv.FlagsOp) error {
 		}
 	}
 
-	db.Lock()
-	defer db.Unlock()
-
 	if len(db.stages) == 0 {
 		db.dirty = true
 	}
 	x := db.traverse(key, true)
 
-	if len(ops) != 0 {
-		flags := kv.ApplyFlagsOps(x.getKeyFlags(), ops...)
-		if flags.AndPersistent() != 0 {
-			db.dirty = true
-		}
-		x.setKeyFlags(flags)
+	// the NeedConstraintCheckInPrewrite flag is temporary,
+	// every write to the node removes the flag unless it's explicitly set.
+	// This set must be in the latest stage so no special processing is needed.
+	var flags kv.KeyFlags
+	if value != nil {
+		flags = kv.ApplyFlagsOps(x.getKeyFlags(), append([]kv.FlagsOp{kv.DelNeedConstraintCheckInPrewrite}, ops...)...)
+	} else {
+		// an UpdateFlag operation, do not delete the NeedConstraintCheckInPrewrite flag.
+		flags = kv.ApplyFlagsOps(x.getKeyFlags(), ops...)
 	}
+	if flags.AndPersistent() != 0 {
+		db.dirty = true
+	}
+	x.setKeyFlags(flags)
 
 	if value == nil {
 		return nil
@@ -336,7 +358,7 @@ func (db *MemDB) set(key []byte, value []byte, ops ...kv.FlagsOp) error {
 }
 
 func (db *MemDB) setValue(x memdbNodeAddr, value []byte) {
-	var activeCp *memdbCheckpoint
+	var activeCp *MemDBCheckpoint
 	if len(db.stages) > 0 {
 		activeCp = &db.stages[len(db.stages)-1]
 	}
@@ -842,4 +864,18 @@ func (db *MemDB) RemoveFromBuffer(key []byte) {
 	}
 	db.size -= len(db.vlog.getValue(x.vptr))
 	db.deleteNode(x)
+}
+
+// SetMemoryFootprintChangeHook sets the hook function that is triggered when memdb grows.
+func (db *MemDB) SetMemoryFootprintChangeHook(hook func(uint64)) {
+	innerHook := func() {
+		hook(db.allocator.capacity + db.vlog.capacity)
+	}
+	db.allocator.memChangeHook.Store(&innerHook)
+	db.vlog.memChangeHook.Store(&innerHook)
+}
+
+// Mem returns the current memory footprint
+func (db *MemDB) Mem() uint64 {
+	return db.allocator.capacity + db.vlog.capacity
 }

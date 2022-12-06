@@ -39,10 +39,11 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"testing"
 	"time"
 
-	"github.com/google/btree"
+	"github.com/gogo/protobuf/proto"
 	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/suite"
@@ -96,7 +97,7 @@ func (s *testRegionCacheSuite) checkCache(len int) {
 	ts := time.Now().Unix()
 	s.Equal(validRegions(s.cache.mu.regions, ts), len)
 	s.Equal(validRegionsSearchedByVersions(s.cache.mu.latestVersions, s.cache.mu.regions, ts), len)
-	s.Equal(validRegionsInBtree(s.cache.mu.sorted, ts), len)
+	s.Equal(s.cache.mu.sorted.ValidRegionsInBtree(ts), len)
 }
 
 func validRegionsSearchedByVersions(
@@ -121,18 +122,6 @@ func validRegions(regions map[RegionVerID]*Region, ts int64) (len int) {
 		}
 		len++
 	}
-	return
-}
-
-func validRegionsInBtree(t *btree.BTree, ts int64) (len int) {
-	t.Descend(func(item btree.Item) bool {
-		r := item.(*btreeItem).cachedRegion
-		if !r.checkRegionCacheTTL(ts) {
-			return true
-		}
-		len++
-		return true
-	})
 	return
 }
 
@@ -1383,4 +1372,239 @@ func (s *testRegionCacheSuite) TestNoBackoffWhenFailToDecodeRegion() {
 	_, err = s.cache.scanRegions(s.bo, []byte{}, []byte{}, 10)
 	s.NotNil(err)
 	s.Equal(0, s.bo.GetTotalBackoffTimes())
+}
+
+func (s *testRegionCacheSuite) TestBuckets() {
+	// proto.Clone clones []byte{} to nil and [][]byte{nil or []byte{}} to [][]byte{[]byte{}}.
+	// nilToEmtpyBytes unifies it for tests.
+	nilToEmtpyBytes := func(s []byte) []byte {
+		if s == nil {
+			s = []byte{}
+		}
+		return s
+	}
+
+	// 1. cached region contains buckets information fetched from PD.
+	r, _ := s.cluster.GetRegion(s.region1)
+	defaultBuckets := &metapb.Buckets{
+		RegionId: s.region1,
+		Version:  uint64(time.Now().Nanosecond()),
+		Keys:     [][]byte{nilToEmtpyBytes(r.GetStartKey()), []byte("a"), []byte("b"), nilToEmtpyBytes(r.GetEndKey())},
+	}
+	s.cluster.SplitRegionBuckets(s.region1, defaultBuckets.Keys, defaultBuckets.Version)
+
+	cachedRegion := s.getRegion([]byte("a"))
+	s.Equal(s.region1, cachedRegion.GetID())
+	buckets := cachedRegion.getStore().buckets
+	s.Equal(defaultBuckets, buckets)
+
+	// test locateBucket
+	loc, err := s.cache.LocateKey(s.bo, []byte("a"))
+	s.NotNil(loc)
+	s.Nil(err)
+	s.Equal(buckets, loc.Buckets)
+	s.Equal(buckets.GetVersion(), loc.GetBucketVersion())
+	for _, key := range [][]byte{{}, {'a' - 1}, []byte("a"), []byte("a0"), []byte("b"), []byte("c")} {
+		b := loc.locateBucket(key)
+		s.NotNil(b)
+		s.True(b.Contains(key))
+	}
+	// Modify the buckets manually to mock stale information.
+	loc.Buckets = proto.Clone(loc.Buckets).(*metapb.Buckets)
+	loc.Buckets.Keys = [][]byte{[]byte("b"), []byte("c"), []byte("d")}
+	for _, key := range [][]byte{[]byte("a"), []byte("d"), []byte("e")} {
+		b := loc.locateBucket(key)
+		s.Nil(b)
+	}
+
+	// 2. insertRegionToCache keeps old buckets information if needed.
+	fakeRegion := &Region{
+		meta:          cachedRegion.meta,
+		syncFlag:      cachedRegion.syncFlag,
+		lastAccess:    cachedRegion.lastAccess,
+		invalidReason: cachedRegion.invalidReason,
+	}
+	fakeRegion.setStore(cachedRegion.getStore().clone())
+	// no buckets
+	fakeRegion.getStore().buckets = nil
+	s.cache.insertRegionToCache(fakeRegion)
+	cachedRegion = s.getRegion([]byte("a"))
+	s.Equal(defaultBuckets, cachedRegion.getStore().buckets)
+	// stale buckets
+	fakeRegion.getStore().buckets = &metapb.Buckets{Version: defaultBuckets.Version - 1}
+	s.cache.insertRegionToCache(fakeRegion)
+	cachedRegion = s.getRegion([]byte("a"))
+	s.Equal(defaultBuckets, cachedRegion.getStore().buckets)
+	// new buckets
+	newBuckets := &metapb.Buckets{
+		RegionId: buckets.RegionId,
+		Version:  defaultBuckets.Version + 1,
+		Keys:     buckets.Keys,
+	}
+	fakeRegion.getStore().buckets = newBuckets
+	s.cache.insertRegionToCache(fakeRegion)
+	cachedRegion = s.getRegion([]byte("a"))
+	s.Equal(newBuckets, cachedRegion.getStore().buckets)
+
+	// 3. epochNotMatch keeps old buckets information.
+	cachedRegion = s.getRegion([]byte("a"))
+	newMeta := proto.Clone(cachedRegion.meta).(*metapb.Region)
+	newMeta.RegionEpoch.Version++
+	newMeta.RegionEpoch.ConfVer++
+	_, err = s.cache.OnRegionEpochNotMatch(s.bo, &RPCContext{Region: cachedRegion.VerID(), Store: s.cache.getStoreByStoreID(s.store1)}, []*metapb.Region{newMeta})
+	s.Nil(err)
+	cachedRegion = s.getRegion([]byte("a"))
+	s.Equal(newBuckets, cachedRegion.getStore().buckets)
+
+	// 4. test UpdateBuckets
+	waitUpdateBuckets := func(expected *metapb.Buckets, key []byte) {
+		var buckets *metapb.Buckets
+		for i := 0; i < 10; i++ {
+			buckets = s.getRegion(key).getStore().buckets
+			if reflect.DeepEqual(expected, buckets) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		s.Equal(expected, buckets)
+	}
+
+	cachedRegion = s.getRegion([]byte("a"))
+	buckets = cachedRegion.getStore().buckets
+	s.cache.UpdateBucketsIfNeeded(cachedRegion.VerID(), buckets.GetVersion()-1)
+	// don't update bucket if the new one's version is stale.
+	waitUpdateBuckets(buckets, []byte("a"))
+
+	// update buckets if it's nil.
+	cachedRegion.getStore().buckets = nil
+	s.cluster.SplitRegionBuckets(cachedRegion.GetID(), defaultBuckets.Keys, defaultBuckets.Version)
+	s.cache.UpdateBucketsIfNeeded(cachedRegion.VerID(), defaultBuckets.GetVersion())
+	waitUpdateBuckets(defaultBuckets, []byte("a"))
+
+	// update buckets if the new one's version is greater than old one's.
+	cachedRegion = s.getRegion([]byte("a"))
+	newBuckets = &metapb.Buckets{
+		RegionId: cachedRegion.GetID(),
+		Version:  defaultBuckets.Version + 1,
+		Keys:     [][]byte{nilToEmtpyBytes(r.GetStartKey()), []byte("a"), nilToEmtpyBytes(r.GetEndKey())},
+	}
+	s.cluster.SplitRegionBuckets(newBuckets.RegionId, newBuckets.Keys, newBuckets.Version)
+	s.cache.UpdateBucketsIfNeeded(cachedRegion.VerID(), newBuckets.GetVersion())
+	waitUpdateBuckets(newBuckets, []byte("a"))
+}
+
+func (s *testRegionCacheSuite) TestLocateBucket() {
+	// proto.Clone clones []byte{} to nil and [][]byte{nil or []byte{}} to [][]byte{[]byte{}}.
+	// nilToEmtpyBytes unifies it for tests.
+	nilToEmtpyBytes := func(s []byte) []byte {
+		if s == nil {
+			s = []byte{}
+		}
+		return s
+	}
+	r, _ := s.cluster.GetRegion(s.region1)
+
+	// First test normal case: region start equals to the first bucket keys and
+	// region end equals to the last bucket key
+	bucketKeys := [][]byte{nilToEmtpyBytes(r.GetStartKey()), []byte("a"), []byte("b"), nilToEmtpyBytes(r.GetEndKey())}
+	s.cluster.SplitRegionBuckets(s.region1, bucketKeys, uint64(time.Now().Nanosecond()))
+	loc, err := s.cache.LocateKey(s.bo, []byte("a"))
+	s.NotNil(loc)
+	s.Nil(err)
+	for _, key := range [][]byte{{}, {'a' - 1}, []byte("a"), []byte("a0"), []byte("b"), []byte("c")} {
+		b := loc.locateBucket(key)
+		s.NotNil(b)
+		s.True(b.Contains(key))
+	}
+
+	// Then test cases where there's some holes in region start and the first bucket key
+	// and in the last bucket key and region end
+	bucketKeys = [][]byte{[]byte("a"), []byte("b")}
+	bucketVersion := uint64(time.Now().Nanosecond())
+	s.cluster.SplitRegionBuckets(s.region1, bucketKeys, bucketVersion)
+	s.cache.UpdateBucketsIfNeeded(s.getRegion([]byte("a")).VerID(), bucketVersion)
+	// wait for region update
+	time.Sleep(300 * time.Millisecond)
+	loc, err = s.cache.LocateKey(s.bo, []byte("a"))
+	s.NotNil(loc)
+	s.Nil(err)
+	for _, key := range [][]byte{{'a' - 1}, []byte("c")} {
+		b := loc.locateBucket(key)
+		s.Nil(b)
+		b = loc.LocateBucket(key)
+		s.NotNil(b)
+		s.True(b.Contains(key))
+	}
+}
+
+func (s *testRegionCacheSuite) TestRemoveIntersectingRegions() {
+	// Split at "b", "c", "d", "e"
+	regions := s.cluster.AllocIDs(4)
+	regions = append([]uint64{s.region1}, regions...)
+
+	peers := [][]uint64{{s.peer1, s.peer2}}
+	for i := 0; i < 4; i++ {
+		peers = append(peers, s.cluster.AllocIDs(2))
+	}
+
+	for i := 0; i < 4; i++ {
+		s.cluster.Split(regions[i], regions[i+1], []byte{'b' + byte(i)}, peers[i+1], peers[i+1][0])
+	}
+
+	for c := 'a'; c <= 'e'; c++ {
+		loc, err := s.cache.LocateKey(s.bo, []byte{byte(c)})
+		s.Nil(err)
+		s.Equal(loc.Region.GetID(), regions[c-'a'])
+	}
+
+	// merge all except the last region together
+	for i := 1; i <= 3; i++ {
+		s.cluster.Merge(regions[0], regions[i])
+	}
+
+	// Now the region cache contains stale information
+	loc, err := s.cache.LocateKey(s.bo, []byte{'c'})
+	s.Nil(err)
+	s.NotEqual(loc.Region.GetID(), regions[0]) // This is incorrect, but is expected
+	loc, err = s.cache.LocateKey(s.bo, []byte{'e'})
+	s.Nil(err)
+	s.Equal(loc.Region.GetID(), regions[4]) // 'e' is not merged yet, so it's still correct
+
+	// If we insert the new region into the cache, the old intersecting regions will be removed.
+	// And the result will be correct.
+	region, err := s.cache.loadRegion(s.bo, []byte("c"), false)
+	s.Nil(err)
+	s.Equal(region.GetID(), regions[0])
+	s.cache.insertRegionToCache(region)
+	loc, err = s.cache.LocateKey(s.bo, []byte{'c'})
+	s.Nil(err)
+	s.Equal(loc.Region.GetID(), regions[0])
+	s.checkCache(2)
+
+	// Now, we merge the last region. This case tests against how we handle the empty end_key.
+	s.cluster.Merge(regions[0], regions[4])
+	region, err = s.cache.loadRegion(s.bo, []byte("e"), false)
+	s.Nil(err)
+	s.Equal(region.GetID(), regions[0])
+	s.cache.insertRegionToCache(region)
+	loc, err = s.cache.LocateKey(s.bo, []byte{'e'})
+	s.Nil(err)
+	s.Equal(loc.Region.GetID(), regions[0])
+	s.checkCache(1)
+}
+
+func (s *testRegionCacheSuite) TestShouldNotRetryFlashback() {
+	loc, err := s.cache.LocateKey(s.bo, []byte("a"))
+	s.NotNil(loc)
+	s.NoError(err)
+	ctx, err := s.cache.GetTiKVRPCContext(retry.NewBackofferWithVars(context.Background(), 100, nil), loc.Region, kv.ReplicaReadLeader, 0)
+	s.NotNil(ctx)
+	s.NoError(err)
+	reqSend := NewRegionRequestSender(s.cache, nil)
+	shouldRetry, err := reqSend.onRegionError(s.bo, ctx, nil, &errorpb.Error{FlashbackInProgress: &errorpb.FlashbackInProgress{}})
+	s.Error(err)
+	s.False(shouldRetry)
+	shouldRetry, err = reqSend.onRegionError(s.bo, ctx, nil, &errorpb.Error{FlashbackNotPrepared: &errorpb.FlashbackNotPrepared{}})
+	s.Error(err)
+	s.False(shouldRetry)
 }

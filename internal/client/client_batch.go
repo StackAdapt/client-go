@@ -606,7 +606,7 @@ func (c *batchCommandsClient) batchRecvLoop(cfg config.TiKVClient, tikvTransport
 			if c.isStopped() {
 				return
 			}
-			logutil.BgLogger().Info(
+			logutil.BgLogger().Debug(
 				"batchRecvLoop fails when receiving, needs to reconnect",
 				zap.String("target", c.target),
 				zap.String("forwardedHost", streamClient.forwardedHost),
@@ -775,7 +775,7 @@ func sendBatchRequest(
 	select {
 	case batchConn.batchCommandsCh <- entry:
 	case <-ctx.Done():
-		logutil.BgLogger().Warn("send request is cancelled",
+		logutil.BgLogger().Debug("send request is cancelled",
 			zap.String("to", addr), zap.String("cause", ctx.Err().Error()))
 		return nil, errors.WithStack(ctx.Err())
 	case <-timer.C:
@@ -791,8 +791,8 @@ func sendBatchRequest(
 		return tikvrpc.FromBatchCommandsResponse(res)
 	case <-ctx.Done():
 		atomic.StoreInt32(&entry.canceled, 1)
-		// logutil.BgLogger().Warn("wait response is cancelled",
-		// 	zap.String("to", addr), zap.String("cause", ctx.Err().Error()))
+		logutil.BgLogger().Debug("wait response is cancelled",
+			zap.String("to", addr), zap.String("cause", ctx.Err().Error()))
 		return nil, errors.WithStack(ctx.Err())
 	case <-timer.C:
 		atomic.StoreInt32(&entry.canceled, 1)
@@ -813,18 +813,7 @@ func (c *RPCClient) recycleIdleConnArray() {
 	c.RUnlock()
 
 	for _, addr := range addrs {
-		c.Lock()
-		conn, ok := c.conns[addr]
-		if ok {
-			delete(c.conns, addr)
-			logutil.BgLogger().Debug("recycle idle connection",
-				zap.String("target", addr))
-		}
-		c.Unlock()
-
-		if conn != nil {
-			conn.Close()
-		}
+		c.CloseAddr(addr)
 	}
 
 	metrics.TiKVBatchClientRecycle.Observe(time.Since(start).Seconds())
